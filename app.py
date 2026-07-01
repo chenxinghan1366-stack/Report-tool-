@@ -92,15 +92,14 @@ def get_audit_logs():
     conn.close()
     return df.to_dict('records') if not df.empty else []
 
-# ---------- 智能列名映射（含丰富同义词） ----------
+# ---------- 智能列名映射 ----------
 def smart_column_mapping(df, required_cols, user_mapping=None):
     df_cols = list(df.columns)
-    # ===== 关键：扩展同义词库，覆盖您Excel中的列名 =====
     synonyms = {
-        '公司': ['公司', '企业', '单位', '公司名称', '企业名称', '单位名称', 'name', 'company', '公司名', '所属公司', '公司全称', '单位名称'],
+        '公司': ['公司', '企业', '单位', '公司名称', '企业名称', '单位名称', 'name', 'company', '公司名', '所属公司', '公司全称'],
         '城市': ['城市', '市', 'city', '地区', '所属城市', '所在地', '城市名', '城市名称'],
-        '姓名': ['姓名', '名字', '员工', 'name', 'employee', '人员', '员工编号', '员工姓名', '姓名', '员工id'],
-        '工资基数': ['工资基数', '基数', '工资', '月工资', '基本工资', 'base', 'salary', '月应发工资', '应发工资', '月薪', '工资总额'],
+        '姓名': ['姓名', '名字', '员工', 'name', 'employee', '人员', '员工编号', '员工姓名', '员工id'],
+        '工资基数': ['工资基数', '基数', '工资', '月工资', '基本工资', 'base', 'salary', '月应发工资', '应发工资', '月薪', '工资总额', '月度工资'],
         '社保基数': ['社保基数', '养老基数', '社保', 'social_security', '社保缴费基数', '社会保险基数'],
         '公积金基数': ['公积金基数', '公积金', 'fund', '公积金缴费基数', '住房公积金基数']
     }
@@ -112,11 +111,9 @@ def smart_column_mapping(df, required_cols, user_mapping=None):
                 for df_col in df_cols:
                     if df_col in mapping.values():
                         continue
-                    # 优先精确匹配
                     if df_col == std_name:
                         mapping[std_name] = df_col
                         break
-                    # 同义词匹配
                     for syn in synonyms.get(std_name, []):
                         if syn.lower() in df_col.lower() or df_col.lower() in syn.lower():
                             mapping[std_name] = df_col
@@ -129,12 +126,10 @@ def smart_column_mapping(df, required_cols, user_mapping=None):
         for std_name in required_cols:
             matched = False
             for df_col in df_cols:
-                # 优先精确匹配
                 if df_col == std_name:
                     mapping[std_name] = df_col
                     matched = True
                     break
-                # 同义词匹配
                 for syn in synonyms.get(std_name, []):
                     if syn.lower() in df_col.lower() or df_col.lower() in syn.lower():
                         mapping[std_name] = df_col
@@ -142,12 +137,11 @@ def smart_column_mapping(df, required_cols, user_mapping=None):
                         break
                 if matched:
                     break
-            # 如果没匹配到，留空让用户手动选
             if std_name not in mapping:
                 mapping[std_name] = None
         return mapping
 
-# ===== 从Excel自动导入公司 =====
+# ===== 从Excel自动导入公司（改进版） =====
 def import_companies_from_excel(df, city_col, company_col):
     companies = df[[company_col, city_col]].drop_duplicates()
     companies = companies.rename(columns={company_col: 'company_name', city_col: 'city'})
@@ -155,6 +149,38 @@ def import_companies_from_excel(df, city_col, company_col):
     companies['district'] = '市区'
     companies['id'] = [str(uuid.uuid4())[:8] for _ in range(len(companies))]
     return companies.to_dict('records')
+
+# ===== 检测公司列和城市列（增强版，避免误匹配） =====
+def detect_company_city_columns(df):
+    company_col = None
+    city_col = None
+    
+    # 1. 先精确匹配“公司名称”和“所属城市”
+    for col in df.columns:
+        if col == '公司名称' or col == '公司名' or col == '企业名称':
+            company_col = col
+            break
+    if company_col is None:
+        # 2. 模糊匹配，但排除包含“总费用”、“合计”等词
+        for col in df.columns:
+            col_lower = col.lower()
+            if '公司' in col_lower and not '总费用' in col_lower and not '合计' in col_lower and not '单位' in col_lower:
+                company_col = col
+                break
+    
+    # 城市列
+    for col in df.columns:
+        if col == '所属城市' or col == '城市' or col == '市':
+            city_col = col
+            break
+    if city_col is None:
+        for col in df.columns:
+            col_lower = col.lower()
+            if '城市' in col_lower or '市' in col_lower:
+                city_col = col
+                break
+    
+    return company_col, city_col
 
 # ---------- 初始化 ----------
 init_db()
@@ -261,21 +287,12 @@ with tab1:
                     st.success(f"成功提取数据，共 {len(df_raw)} 行")
                     st.dataframe(df_raw.head(5))
                     
-                    # ===== 核心新增：自动导入公司 =====
+                    # ===== 核心：自动导入公司（使用增强检测） =====
                     st.subheader("🏢 2. 自动导入公司列表")
-                    # 查找公司列和城市列
-                    company_col = None
-                    city_col = None
-                    for col in df_raw.columns:
-                        col_lower = col.lower()
-                        if any(k in col_lower for k in ['公司', '企业', '单位', 'company']):
-                            company_col = col
-                        if any(k in col_lower for k in ['城市', '市', 'city']):
-                            city_col = col
+                    company_col, city_col = detect_company_city_columns(df_raw)
                     
                     if company_col and city_col:
                         st.info(f"检测到公司列：{company_col}，城市列：{city_col}")
-                        # 预览将要导入的公司
                         preview_companies = df_raw[[company_col, city_col]].drop_duplicates()
                         st.write("将导入以下公司：")
                         st.dataframe(preview_companies)
@@ -287,9 +304,9 @@ with tab1:
                             auto_imported = True
                             st.rerun()
                     else:
-                        st.warning("未自动检测到公司列或城市列，请确认数据格式。您也可以在「数据管理」中手动添加公司。")
+                        st.warning("未检测到公司列或城市列，请确认数据格式。您也可以在「数据管理」中手动添加公司。")
                     
-                    # ===== 列名映射（用于生成报表的员工数据） =====
+                    # ===== 列名映射 =====
                     st.subheader("🔍 3. 列名映射（用于生成报表）")
                     required_cols = ['公司', '城市', '姓名', '工资基数']
                     col_mapping = smart_column_mapping(df_raw, required_cols)
@@ -305,14 +322,12 @@ with tab1:
                     
                     if col_mapping.get('公司') and col_mapping.get('工资基数'):
                         st.success("✅ 列映射完成！")
-                        # 构建标准数据
                         std_data = {}
                         for std_name, actual_col in col_mapping.items():
                             if actual_col and actual_col in df_raw.columns:
                                 std_data[std_name] = df_raw[actual_col]
                         df_std = pd.DataFrame(std_data)
                         
-                        # 处理姓名
                         if '姓名' not in df_std.columns or df_std['姓名'].isnull().all():
                             for col in df_raw.columns:
                                 if '编号' in col or 'ID' in col or '员工' in col:
@@ -321,7 +336,6 @@ with tab1:
                         if '姓名' not in df_std.columns or df_std['姓名'].isnull().all():
                             df_std['姓名'] = [f"员工{i+1}" for i in range(len(df_std))]
                         
-                        # 处理工资基数
                         if '工资基数' in df_std.columns:
                             df_std['工资基数'] = pd.to_numeric(df_std['工资基数'], errors='coerce')
                             df_std = df_std.dropna(subset=['工资基数'])
@@ -430,28 +444,31 @@ with tab1:
                         fname = f"{company_name}_{year}{month or ''}.csv"
                         generated_files.append((fname, output.getvalue(), 'text/csv'))
                     elif export_format == "PDF (.pdf)":
-                        from fpdf import FPDF
-                        pdf = FPDF()
-                        pdf.add_page()
-                        pdf.set_font("Arial", size=12)
-                        pdf.cell(200, 10, txt=f"{company_name} - 社保公积金报表", ln=True, align='C')
-                        pdf.ln(10)
-                        pdf.set_font("Arial", size=10)
-                        pdf.cell(100, 8, f"总人数: {len(export_data)}", ln=False)
-                        pdf.cell(100, 8, f"总成本: {export_data['总成本'].sum():,.2f}", ln=True)
-                        pdf.ln(5)
-                        headers = export_data.columns.tolist()
-                        for i, h in enumerate(headers[:8]):
-                            pdf.cell(20, 8, h, border=1)
-                        pdf.ln()
-                        for _, row in export_data.head(20).iterrows():
-                            for i, val in enumerate(row[:8]):
-                                pdf.cell(20, 8, str(val), border=1)
+                        try:
+                            from fpdf import FPDF
+                            pdf = FPDF()
+                            pdf.add_page()
+                            pdf.set_font("Arial", size=12)
+                            pdf.cell(200, 10, txt=f"{company_name} - 社保公积金报表", ln=True, align='C')
+                            pdf.ln(10)
+                            pdf.set_font("Arial", size=10)
+                            pdf.cell(100, 8, f"总人数: {len(export_data)}", ln=False)
+                            pdf.cell(100, 8, f"总成本: {export_data['总成本'].sum():,.2f}", ln=True)
+                            pdf.ln(5)
+                            headers = export_data.columns.tolist()
+                            for i, h in enumerate(headers[:8]):
+                                pdf.cell(20, 8, h, border=1)
                             pdf.ln()
-                        pdf_output = pdf.output(dest='S').encode('latin1')
-                        output = BytesIO(pdf_output)
-                        fname = f"{company_name}_{year}{month or ''}.pdf"
-                        generated_files.append((fname, output.getvalue(), 'application/pdf'))
+                            for _, row in export_data.head(20).iterrows():
+                                for i, val in enumerate(row[:8]):
+                                    pdf.cell(20, 8, str(val), border=1)
+                                pdf.ln()
+                            pdf_output = pdf.output(dest='S').encode('latin1')
+                            output = BytesIO(pdf_output)
+                            fname = f"{company_name}_{year}{month or ''}.pdf"
+                            generated_files.append((fname, output.getvalue(), 'application/pdf'))
+                        except ImportError:
+                            st.error("PDF导出需要安装 fpdf 库，请运行: pip install fpdf")
                     else:
                         if custom_template:
                             wb = load_workbook(BytesIO(custom_template['file_data']))
