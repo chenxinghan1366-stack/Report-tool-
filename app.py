@@ -94,7 +94,6 @@ def get_audit_logs():
 
 # ---------- 智能列名映射 ----------
 def smart_column_mapping(df, required_cols):
-    # 确保列名为字符串
     df_cols = [str(c) for c in df.columns]
     synonyms = {
         '公司': ['公司', '企业', '单位名称', '公司名称', '企业名称', '单位名称', 'name', 'company', '公司名', '所属公司', '公司全称'],
@@ -123,8 +122,8 @@ def smart_column_mapping(df, required_cols):
             mapping[std_name] = None
     return mapping
 
-# ===== 自动导入规则（重写，更健壮） =====
-def import_rules_from_excel(xls):
+# ===== 自动导入规则（增强版，支持手动指定表头行） =====
+def import_rules_from_excel(xls, user_header_row=None):
     """
     从Excel的"基础配置表"Sheet导入城市规则
     """
@@ -140,19 +139,24 @@ def import_rules_from_excel(xls):
     try:
         # 读取全部数据，不设header
         df_full = pd.read_excel(xls, sheet_name=rule_sheet, header=None)
-        # 寻找表头行：包含"城市"且包含"社保基数下限"或"养老单位比例"的行
         header_row_idx = None
-        for i in range(len(df_full)):
-            row_text = ' '.join([str(v) for v in df_full.iloc[i].values if pd.notna(v)])
-            if '城市' in row_text and ('社保基数下限' in row_text or '养老单位比例' in row_text):
-                header_row_idx = i
-                break
+
+        if user_header_row is not None:
+            header_row_idx = user_header_row
+        else:
+            # 自动寻找包含"城市"且包含"基数"或"比例"的行
+            for i in range(len(df_full)):
+                row_text = ' '.join([str(v) for v in df_full.iloc[i].values if pd.notna(v)])
+                if '城市' in row_text and ('基数' in row_text or '比例' in row_text):
+                    header_row_idx = i
+                    break
+
         if header_row_idx is None:
-            return 0, "未找到包含列名的行（需要包含‘城市’和‘社保基数下限’等）"
+            # 如果没找到，让用户输入
+            return 0, "未自动找到表头行，请手动在「管理数据」中导入规则"
 
         # 重新读取，用找到的行作为表头
         df_rules = pd.read_excel(xls, sheet_name=rule_sheet, skiprows=header_row_idx)
-        # 将列名转换为字符串，并去除空白
         df_rules.columns = [str(c).strip() for c in df_rules.columns]
 
         # 列名映射
@@ -161,13 +165,13 @@ def import_rules_from_excel(xls):
             col_lower = col.lower()
             if '城市' in col_lower:
                 col_map['城市'] = col
-            elif '社保基数下限' in col_lower:
+            elif '社保基数下限' in col_lower or '最低基数' in col_lower:
                 col_map['社保最低基数'] = col
-            elif '社保基数上限' in col_lower:
+            elif '社保基数上限' in col_lower or '最高基数' in col_lower:
                 col_map['社保最高基数'] = col
-            elif '养老单位比例' in col_lower or '单位养老' in col_lower:
+            elif '养老单位比例' in col_lower or '单位养老' in col_lower or '单位社保' in col_lower:
                 col_map['单位社保比例'] = col
-            elif '养老个人比例' in col_lower or '个人养老' in col_lower:
+            elif '养老个人比例' in col_lower or '个人养老' in col_lower or '个人社保' in col_lower:
                 col_map['个人社保比例'] = col
             elif '公积金单位比例' in col_lower or '单位公积金' in col_lower:
                 col_map['单位公积金比例'] = col
@@ -178,13 +182,11 @@ def import_rules_from_excel(xls):
             elif '公积金基数上限' in col_lower:
                 col_map['公积金最高基数'] = col
 
-        # 检查必要列
         required = ['城市', '单位社保比例', '个人社保比例', '单位公积金比例', '个人公积金比例']
         missing = [r for r in required if r not in col_map]
         if missing:
-            return 0, f"缺少必要列：{', '.join(missing)}，请确保表格包含这些列（或等价列名）"
+            return 0, f"缺少必要列：{', '.join(missing)}，请检查表头行是否正确"
 
-        # 构建规则列表
         rules_list = []
         for idx, row in df_rules.iterrows():
             city = row[col_map['城市']]
@@ -201,7 +203,7 @@ def import_rules_from_excel(xls):
             social_max = float(row[col_map['社保最高基数']]) if col_map.get('社保最高基数') is not None and not pd.isna(row[col_map['社保最高基数']]) else 999999
             fund_min = float(row[col_map['公积金最低基数']]) if col_map.get('公积金最低基数') is not None and not pd.isna(row[col_map['公积金最低基数']]) else 0
             fund_max = float(row[col_map['公积金最高基数']]) if col_map.get('公积金最高基数') is not None and not pd.isna(row[col_map['公积金最高基数']]) else 999999
-            
+
             rules_list.append({
                 "id": str(uuid.uuid4())[:8],
                 "province": city,
@@ -221,7 +223,7 @@ def import_rules_from_excel(xls):
             save_table('rules', rules_list)
             return len(rules_list), None
         else:
-            return 0, "未解析到有效数据，请检查表格格式"
+            return 0, "未解析到有效数据"
     except Exception as e:
         return 0, f"解析规则时出错：{str(e)}"
 
@@ -282,10 +284,9 @@ with tab1:
                 selected_sheet = st.selectbox("选择Sheet", sheets, index=0)
                 if selected_sheet:
                     df_raw = pd.read_excel(uploaded, sheet_name=selected_sheet)
-                    # 确保列名为字符串
                     df_raw.columns = [str(c) for c in df_raw.columns]
                 
-                # ===== 自动导入规则（检测基础配置表） =====
+                # ===== 自动导入规则 =====
                 with st.spinner("正在自动识别并导入城市规则..."):
                     count, error_msg = import_rules_from_excel(xls)
                     if count > 0:
@@ -305,18 +306,15 @@ with tab1:
                 st.info(f"📊 读取到 {len(df_raw)} 行，{len(df_raw.columns)} 列")
                 st.dataframe(df_raw.head(5))
                 
-                # 自动检测表头行（针对数据Sheet）
-                # 如果当前Sheet是“月度明细数据表”，自动跳过第一行标题（“2025年社保公积金月度缴费明细数据表...”）
-                # 但我们的通用检测逻辑会寻找包含“公司”或“城市”的行作为表头
+                # 自动检测表头行
                 header_row = 0
                 for i, row in df_raw.iterrows():
                     row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
-                    if any(key in row_text for key in ['公司', '城市', '姓名', '工资', '基数', '员工', '企业']):
+                    if any(key in row_text for key in ['公司', '城市', '姓名', '工资', '基数', '员工', '企业', '分公司']):
                         header_row = i
                         break
                 
                 if header_row == 0:
-                    # 如果没找到，可能是第一行是标题，第二行是数据，让用户手动输入
                     header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=0, step=1)
                 else:
                     st.info(f"自动检测到表头行：第 {header_row} 行")
@@ -325,9 +323,7 @@ with tab1:
                         header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=header_row, step=1)
                 
                 if header_row < len(df_raw):
-                    # 使用检测到的行作为表头
                     new_header = df_raw.iloc[header_row]
-                    # 将表头转换为字符串
                     new_header = [str(h) for h in new_header]
                     df_raw = df_raw[header_row+1:]
                     df_raw.columns = new_header
@@ -379,7 +375,7 @@ with tab1:
         except Exception as e:
             st.error(f"❌ 读取文件失败：{str(e)}")
     
-    # ===== 选择公司和生成报表（直接从数据中提取公司列表） =====
+    # ===== 选择公司和生成报表 =====
     st.subheader("📤 3. 选择公司并生成报表")
     
     if df_std is not None and not df_std.empty:
@@ -424,7 +420,6 @@ with tab1:
                 
                 for label in selected_labels:
                     company_name, city = company_map[label]
-                    # 筛选该公司的数据
                     df_wage = df_std[df_std['公司'] == company_name].copy()
                     if df_wage.empty:
                         errors.append(f"{company_name}: 未找到员工数据")
