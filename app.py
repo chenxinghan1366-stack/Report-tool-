@@ -92,12 +92,8 @@ def get_audit_logs():
     conn.close()
     return df.to_dict('records') if not df.empty else []
 
-# ---------- 智能列名映射（增强版） ----------
+# ---------- 智能列名映射 ----------
 def smart_column_mapping(df, required_cols, user_mapping=None):
-    """
-    智能匹配列名，返回映射字典 {标准列名: 实际列名}
-    如果 user_mapping 提供，则优先使用
-    """
     df_cols = list(df.columns)
     synonyms = {
         '公司': ['公司', '企业', '单位', '公司名称', '企业名称', '单位名称', 'name', 'company', '公司名'],
@@ -109,9 +105,7 @@ def smart_column_mapping(df, required_cols, user_mapping=None):
     }
     
     if user_mapping:
-        # 用户手动映射部分优先
         mapping = {k: v for k, v in user_mapping.items() if v}
-        # 未映射的列自动匹配
         for std_name in required_cols:
             if std_name not in mapping or not mapping[std_name]:
                 for df_col in df_cols:
@@ -142,6 +136,19 @@ def smart_column_mapping(df, required_cols, user_mapping=None):
                     break
         return mapping
 
+# ===== 新增：从Excel自动导入公司 =====
+def import_companies_from_excel(df, city_col, company_col):
+    """从数据中提取公司列表，自动填充到company_master"""
+    # 提取唯一的公司-城市组合
+    companies = df[[company_col, city_col]].drop_duplicates()
+    companies = companies.rename(columns={company_col: 'company_name', city_col: 'city'})
+    # 添加省份（通过城市映射，暂时用城市名作为省份，后续可优化）
+    # 简单处理：用城市名作为省份（用户可后续手动调整）
+    companies['province'] = companies['city']
+    companies['district'] = '市区'
+    companies['id'] = [str(uuid.uuid4())[:8] for _ in range(len(companies))]
+    return companies.to_dict('records')
+
 # ---------- 初始化 ----------
 init_db()
 if not load_table('companies'):
@@ -164,7 +171,7 @@ if not load_table('rules'):
 # ---------- Streamlit 页面 ----------
 st.set_page_config(page_title="本地社保报表系统", layout="wide")
 st.title("📋 本地社保公积金报表系统（智能版）")
-st.markdown("🔒 **支持直接读取汇总报表，自动匹配列名**")
+st.markdown("🔒 **支持从Excel自动导入公司、规则和数据，直接匹配**")
 
 # 仪表盘
 history = get_export_history()
@@ -183,21 +190,156 @@ with col4:
 
 tab1, tab2, tab3, tab4 = st.tabs(["📊 生成报表", "📋 报表历史与复核", "✏️ 数据管理", "📄 自定义模板"])
 
-# ==================== 生成报表（升级版） ====================
+# ==================== 生成报表（升级版：支持自动导入公司） ====================
 with tab1:
     companies_data = load_table('companies')
     rules_data = load_table('rules')
     custom_templates = load_table('custom_templates')
     
-    if not companies_data:
-        st.warning("请先在「数据管理」中添加公司信息")
+    # ===== 新增：显示当前公司列表 =====
+    if companies_data:
+        st.info(f"当前共有 {len(companies_data)} 家公司可选用")
     else:
-        st.subheader("📤 生成报表")
-        # 选择公司
+        st.warning("请先上传数据并导入公司，或在「数据管理」中手动添加")
+    
+    # ===== 上传数据并自动导入公司 =====
+    st.subheader("📤 1. 上传数据（自动识别公司、城市、员工）")
+    st.caption("上传Excel后，系统自动提取公司列表并导入，无需手动添加")
+    uploaded = st.file_uploader("选择文件（.xlsx, .xls, .csv, .txt）", type=["xlsx", "xls", "csv", "txt"])
+    
+    df_raw = None
+    df_std = None
+    sheets = []
+    selected_sheet = None
+    auto_imported = False
+    
+    if uploaded:
+        try:
+            file_ext = uploaded.name.split('.')[-1].lower()
+            if file_ext in ['xlsx', 'xls']:
+                xls = pd.ExcelFile(uploaded)
+                sheets = xls.sheet_names
+                selected_sheet = st.selectbox("选择Sheet", sheets, index=0)
+                if selected_sheet:
+                    df_raw = pd.read_excel(uploaded, sheet_name=selected_sheet)
+            elif file_ext == 'csv':
+                df_raw = pd.read_csv(uploaded, encoding='utf-8-sig')
+            elif file_ext == 'txt':
+                df_raw = pd.read_csv(uploaded, delimiter='\t', encoding='utf-8-sig')
+            
+            if df_raw is not None:
+                st.info(f"📊 读取到 {len(df_raw)} 行，{len(df_raw.columns)} 列")
+                st.dataframe(df_raw.head(5))
+                
+                # 自动检测表头行
+                header_row = 0
+                for i, row in df_raw.iterrows():
+                    row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
+                    if any(key in row_text for key in ['公司', '城市', '姓名', '工资', '基数', '员工', '企业']):
+                        header_row = i
+                        break
+                
+                if header_row == 0:
+                    header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=0, step=1)
+                else:
+                    st.info(f"自动检测到表头行：第 {header_row} 行")
+                    override = st.checkbox("手动调整表头行号")
+                    if override:
+                        header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=header_row, step=1)
+                
+                if header_row < len(df_raw):
+                    new_header = df_raw.iloc[header_row]
+                    df_raw = df_raw[header_row+1:]
+                    df_raw.columns = new_header
+                    df_raw = df_raw.reset_index(drop=True)
+                    df_raw = df_raw.dropna(how='all')
+                    st.success(f"成功提取数据，共 {len(df_raw)} 行")
+                    st.dataframe(df_raw.head(5))
+                    
+                    # ===== 核心新增：自动导入公司 =====
+                    st.subheader("🏢 2. 自动导入公司列表")
+                    # 查找公司列和城市列
+                    company_col = None
+                    city_col = None
+                    for col in df_raw.columns:
+                        col_lower = col.lower()
+                        if any(k in col_lower for k in ['公司', '企业', '单位', 'company']):
+                            company_col = col
+                        if any(k in col_lower for k in ['城市', '市', 'city']):
+                            city_col = col
+                    
+                    if company_col and city_col:
+                        st.info(f"检测到公司列：{company_col}，城市列：{city_col}")
+                        # 预览将要导入的公司
+                        preview_companies = df_raw[[company_col, city_col]].drop_duplicates()
+                        st.write("将导入以下公司：")
+                        st.dataframe(preview_companies)
+                        
+                        if st.button("✅ 一键导入公司（覆盖当前列表）"):
+                            new_companies = import_companies_from_excel(df_raw, city_col, company_col)
+                            save_table('companies', new_companies)
+                            st.success(f"成功导入 {len(new_companies)} 家公司！")
+                            auto_imported = True
+                            st.rerun()
+                    else:
+                        st.warning("未自动检测到公司列或城市列，请确认数据格式。您也可以在「数据管理」中手动添加公司。")
+                    
+                    # ===== 列名映射（用于生成报表的员工数据） =====
+                    st.subheader("🔍 3. 列名映射（用于生成报表）")
+                    required_cols = ['公司', '城市', '姓名', '工资基数']
+                    col_mapping = smart_column_mapping(df_raw, required_cols)
+                    
+                    mapping_ok = True
+                    for std_name, actual_col in col_mapping.items():
+                        if actual_col is None or actual_col == '':
+                            mapping_ok = False
+                            options = [''] + list(df_raw.columns)
+                            selected = st.selectbox(f"请选择 '{std_name}' 对应的列", options, key=f"map_{std_name}_{uploaded.name}")
+                            if selected:
+                                col_mapping[std_name] = selected
+                    
+                    if col_mapping.get('公司') and col_mapping.get('工资基数'):
+                        st.success("✅ 列映射完成！")
+                        # 构建标准数据
+                        std_data = {}
+                        for std_name, actual_col in col_mapping.items():
+                            if actual_col and actual_col in df_raw.columns:
+                                std_data[std_name] = df_raw[actual_col]
+                        df_std = pd.DataFrame(std_data)
+                        
+                        # 处理姓名
+                        if '姓名' not in df_std.columns or df_std['姓名'].isnull().all():
+                            for col in df_raw.columns:
+                                if '编号' in col or 'ID' in col or '员工' in col:
+                                    df_std['姓名'] = df_raw[col]
+                                    break
+                        if '姓名' not in df_std.columns or df_std['姓名'].isnull().all():
+                            df_std['姓名'] = [f"员工{i+1}" for i in range(len(df_std))]
+                        
+                        # 处理工资基数
+                        if '工资基数' in df_std.columns:
+                            df_std['工资基数'] = pd.to_numeric(df_std['工资基数'], errors='coerce')
+                            df_std = df_std.dropna(subset=['工资基数'])
+                            st.success(f"数据准备完成，共 {len(df_std)} 条有效记录")
+                            st.dataframe(df_std.head(5))
+                        else:
+                            st.error("未找到工资基数列")
+                            df_std = None
+                    else:
+                        st.warning("列映射未完成，请确保'公司'和'工资基数'已映射")
+        except Exception as e:
+            st.error(f"❌ 读取文件失败：{str(e)}")
+    
+    # ===== 选择公司和生成报表 =====
+    st.subheader("📤 4. 选择公司并生成报表")
+    companies_data = load_table('companies')
+    
+    if not companies_data:
+        st.warning("请先上传数据并导入公司，或手动添加")
+    else:
         company_options = [f"{c['company_name']} ({c['city']})" for c in companies_data]
         selected_indices = st.multiselect("选择公司（可多选）", range(len(company_options)), format_func=lambda x: company_options[x])
         
-        # 报表参数
         col1, col2, col3 = st.columns(3)
         with col1:
             report_type = st.selectbox("报表类型", ["月度申报", "年度汇算"])
@@ -208,157 +350,17 @@ with tab1:
                 month = st.selectbox("月份", list(range(1,13)), index=11)
             else:
                 month = None
-                st.info("年度汇算无月份")
         
-        # 导出格式
         export_format = st.radio("导出格式", ["Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)"], horizontal=True)
-        
-        # 模板选择
         template_options = ["使用默认模板"] + [t['name'] for t in custom_templates] if custom_templates else ["使用默认模板"]
         selected_template_name = st.selectbox("选择模板", template_options)
         
-        # ===== 上传数据（升级：支持选择Sheet和列映射） =====
-        st.subheader("📤 上传数据（支持明细表或汇总表）")
-        st.caption("支持 .xlsx, .xls, .csv, .txt 格式，可自动识别列名")
-        uploaded = st.file_uploader("选择文件", type=["xlsx", "xls", "csv", "txt"])
-        
-        df_raw = None
-        df_std = None
-        mapping_error = None
-        sheets = []
-        selected_sheet = None
-        
-        if uploaded:
-            try:
-                file_ext = uploaded.name.split('.')[-1].lower()
-                if file_ext in ['xlsx', 'xls']:
-                    xls = pd.ExcelFile(uploaded)
-                    sheets = xls.sheet_names
-                    selected_sheet = st.selectbox("选择Sheet", sheets, index=0)
-                    if selected_sheet:
-                        df_raw = pd.read_excel(uploaded, sheet_name=selected_sheet)
-                elif file_ext == 'csv':
-                    df_raw = pd.read_csv(uploaded, encoding='utf-8-sig')
-                elif file_ext == 'txt':
-                    df_raw = pd.read_csv(uploaded, delimiter='\t', encoding='utf-8-sig')
-                else:
-                    st.error("不支持的文件格式")
-                    df_raw = None
-                
-                if df_raw is not None:
-                    st.info(f"📊 读取到 {len(df_raw)} 行，{len(df_raw.columns)} 列")
-                    # 显示原始数据预览
-                    st.dataframe(df_raw.head(5))
-                    
-                    # 自动检测表头行（跳过空白行和标题行）
-                    # 寻找第一行包含“公司”或“城市”或“姓名”等关键字的行作为表头
-                    header_row = 0
-                    for i, row in df_raw.iterrows():
-                        row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
-                        if any(key in row_text for key in ['公司', '城市', '姓名', '工资', '基数', '员工']):
-                            header_row = i
-                            break
-                    
-                    # 如果自动检测失败，让用户手动选择
-                    if header_row == 0:
-                        header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=0, step=1)
-                    else:
-                        st.info(f"自动检测到表头行：第 {header_row} 行")
-                        # 让用户确认或调整
-                        override = st.checkbox("手动调整表头行号")
-                        if override:
-                            header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=header_row, step=1)
-                    
-                    # 提取数据
-                    if header_row < len(df_raw):
-                        # 设置表头
-                        new_header = df_raw.iloc[header_row]
-                        df_raw = df_raw[header_row+1:]
-                        df_raw.columns = new_header
-                        # 重置索引
-                        df_raw = df_raw.reset_index(drop=True)
-                        # 删除全为空的行
-                        df_raw = df_raw.dropna(how='all')
-                        st.success(f"成功提取数据，共 {len(df_raw)} 行")
-                        st.dataframe(df_raw.head(5))
-                        
-                        # 智能列名映射
-                        required_cols = ['公司', '城市', '姓名', '工资基数']
-                        # 检测数据中是否包含这些列（或类似列）
-                        col_mapping = smart_column_mapping(df_raw, required_cols)
-                        
-                        # 显示映射结果，让用户确认
-                        st.subheader("🔍 列名映射确认")
-                        mapping_ok = True
-                        for std_name, actual_col in col_mapping.items():
-                            if actual_col is None or actual_col == '':
-                                mapping_ok = False
-                                # 让用户手动选择
-                                options = [''] + list(df_raw.columns)
-                                selected = st.selectbox(f"请选择 '{std_name}' 对应的列", options, key=f"map_{std_name}_{uploaded.name}")
-                                if selected:
-                                    col_mapping[std_name] = selected
-                                else:
-                                    st.warning(f"'{std_name}' 未映射，可能影响报表生成")
-                        # 如果仍有未映射的，给出警告
-                        missing = [k for k, v in col_mapping.items() if not v]
-                        if missing:
-                            st.warning(f"以下列未映射：{', '.join(missing)}，将尝试用默认值填充")
-                        else:
-                            st.success("列映射完成！")
-                        
-                        # 构建标准数据框
-                        std_data = {}
-                        for std_name, actual_col in col_mapping.items():
-                            if actual_col and actual_col in df_raw.columns:
-                                std_data[std_name] = df_raw[actual_col]
-                            else:
-                                std_data[std_name] = None
-                        df_std = pd.DataFrame(std_data)
-                        
-                        # 如果缺少“姓名”列，尝试用“员工编号”或“员工”列代替
-                        if '姓名' not in df_std.columns or df_std['姓名'].isnull().all():
-                            for col in df_raw.columns:
-                                if '编号' in col or 'ID' in col or '员工' in col:
-                                    df_std['姓名'] = df_raw[col]
-                                    st.info(f"使用 '{col}' 作为姓名标识")
-                                    break
-                        
-                        # 如果仍然没有姓名，生成默认编号
-                        if '姓名' not in df_std.columns or df_std['姓名'].isnull().all():
-                            df_std['姓名'] = [f"员工{i+1}" for i in range(len(df_std))]
-                            st.info("未找到姓名列，自动生成编号")
-                        
-                        # 处理工资基数：尝试从“工资基数”列读取，若无则尝试“月应发工资”
-                        if '工资基数' not in df_std.columns or df_std['工资基数'].isnull().all():
-                            for col in df_raw.columns:
-                                if '工资' in col or '基数' in col or '月应发' in col:
-                                    df_std['工资基数'] = df_raw[col]
-                                    st.info(f"使用 '{col}' 作为工资基数")
-                                    break
-                        
-                        # 如果仍然没有工资基数，报错
-                        if '工资基数' not in df_std.columns or df_std['工资基数'].isnull().all():
-                            st.error("未能找到工资基数列，请确保数据中包含工资基数信息")
-                            df_std = None
-                        else:
-                            # 转换为数字
-                            df_std['工资基数'] = pd.to_numeric(df_std['工资基数'], errors='coerce')
-                            # 删除工资基数为空的行
-                            df_std = df_std.dropna(subset=['工资基数'])
-                            st.success(f"数据准备完成，共 {len(df_std)} 条有效记录")
-                            st.dataframe(df_std.head(5))
-            except Exception as e:
-                st.error(f"❌ 读取文件失败：{str(e)}")
-        
-        # 生成按钮
         if st.button("🚀 生成报表", type="primary"):
             if df_std is None or df_std.empty:
-                st.error("请先上传并准备数据")
+                st.error("请先上传并准备数据（步骤1-3）")
             elif not selected_indices:
                 st.error("请至少选择一个公司")
             else:
-                # 获取自定义模板
                 custom_template = None
                 if selected_template_name != "使用默认模板":
                     for t in custom_templates:
@@ -380,14 +382,12 @@ with tab1:
                         errors.append(f"{company_name}: 未找到员工数据")
                         continue
                     
-                    # 匹配规则
                     matched = rule_df[(rule_df['city'] == city) & (rule_df['report_type'] == report_type)]
                     if matched.empty:
                         errors.append(f"{company_name}: 未找到 {city} 的规则")
                         continue
                     rule = matched.iloc[0]
                     
-                    # 计算
                     unit_social = rule.get('unit_social', 0.16)
                     personal_social = rule.get('personal_social', 0.08)
                     unit_fund = rule.get('unit_fund', 0.07)
@@ -402,7 +402,6 @@ with tab1:
                     if '公积金基数' not in df_wage.columns:
                         df_wage['公积金基数'] = df_wage['工资基数']
                     
-                    # 校验基数
                     df_wage['社保基数调整'] = df_wage['社保基数'].apply(lambda x: max(social_min, min(x, social_max)))
                     df_wage['公积金基数调整'] = df_wage['公积金基数'].apply(lambda x: max(fund_min, min(x, fund_max)))
                     df_wage['单位社保'] = df_wage['社保基数调整'] * unit_social
@@ -413,7 +412,6 @@ with tab1:
                     df_wage['个人合计'] = df_wage['个人社保'] + df_wage['个人公积金']
                     df_wage['总成本'] = df_wage['单位合计'] + df_wage['个人合计']
                     
-                    # 生成不同格式
                     export_data = df_wage[['公司','城市','姓名','工资基数','社保基数调整','公积金基数调整',
                                           '单位社保','个人社保','单位公积金','个人公积金','单位合计','个人合计','总成本']].copy()
                     export_data.columns = ['公司','城市','姓名','工资基数','社保基数','公积金基数',
@@ -427,7 +425,6 @@ with tab1:
                         fname = f"{company_name}_{year}{month or ''}.csv"
                         generated_files.append((fname, output.getvalue(), 'text/csv'))
                     elif export_format == "PDF (.pdf)":
-                        # 简单PDF生成（需安装reportlab或fpdf，这里用fpdf）
                         from fpdf import FPDF
                         pdf = FPDF()
                         pdf.add_page()
@@ -438,7 +435,6 @@ with tab1:
                         pdf.cell(100, 8, f"总人数: {len(export_data)}", ln=False)
                         pdf.cell(100, 8, f"总成本: {export_data['总成本'].sum():,.2f}", ln=True)
                         pdf.ln(5)
-                        # 表头（仅前8列）
                         headers = export_data.columns.tolist()
                         for i, h in enumerate(headers[:8]):
                             pdf.cell(20, 8, h, border=1)
@@ -451,7 +447,7 @@ with tab1:
                         output = BytesIO(pdf_output)
                         fname = f"{company_name}_{year}{month or ''}.pdf"
                         generated_files.append((fname, output.getvalue(), 'application/pdf'))
-                    else:  # Excel
+                    else:
                         if custom_template:
                             wb = load_workbook(BytesIO(custom_template['file_data']))
                             ws = wb.active
@@ -483,7 +479,6 @@ with tab1:
                         fname = f"{company_name}_{year}{month or ''}.xlsx"
                         generated_files.append((fname, output.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'))
                     
-                    # 保存历史
                     export_id = str(uuid.uuid4())[:8]
                     record = {
                         "id": export_id,
@@ -528,7 +523,7 @@ with tab1:
                         fname, data, mime = generated_files[0]
                         st.download_button(f"📥 下载 {fname}", data=BytesIO(data), file_name=fname, mime=mime)
 
-# ==================== 报表历史与复核（不变） ====================
+# ==================== 报表历史与复核 ====================
 with tab2:
     st.subheader("📋 历史记录")
     history = get_export_history()
@@ -609,68 +604,5 @@ with tab3:
         if st.button("保存规则"):
             save_table('rules', edited_rules)
             st.success("已保存")
-    
-    with st.expander("📤 批量导入 Excel（公司+规则）"):
-        uploaded_file = st.file_uploader("选择 Excel", type=["xlsx"], key="import_batch")
-        if uploaded_file:
-            try:
-                xls = pd.ExcelFile(uploaded_file)
-                if "公司" in xls.sheet_names and "规则" in xls.sheet_names:
-                    df_comp = pd.read_excel(uploaded_file, sheet_name="公司")
-                    df_rule = pd.read_excel(uploaded_file, sheet_name="规则")
-                    df_comp['id'] = [str(uuid.uuid4())[:8] for _ in range(len(df_comp))]
-                    df_rule['id'] = [str(uuid.uuid4())[:8] for _ in range(len(df_rule))]
-                    st.write("预览公司", df_comp.head())
-                    st.write("预览规则", df_rule.head())
-                    if st.button("确认导入"):
-                        save_table('companies', df_comp.to_dict('records'))
-                        save_table('rules', df_rule.to_dict('records'))
-                        st.success("导入成功！")
-                        st.rerun()
-                else:
-                    st.warning("需要「公司」和「规则」两个 Sheet")
-            except Exception as e:
-                st.error(f"解析失败：{e}")
-
-# ==================== 自定义模板 ====================
-with tab4:
-    st.subheader("📄 自定义报表模板")
-    custom_templates = load_table('custom_templates')
-    col1, col2 = st.columns(2)
-    with col1:
-        uploaded_template = st.file_uploader("上传模板 (.xlsx)", type=["xlsx"], key="template_upload")
-        if uploaded_template:
-            st.success(f"已上传：{uploaded_template.name}")
-            if st.button("保存模板"):
-                template_data = {
-                    "id": str(uuid.uuid4())[:8],
-                    "name": uploaded_template.name,
-                    "file_data": uploaded_template.getvalue(),
-                    "field_mapping": ""
-                }
-                existing = [t for t in custom_templates if t['name'] == uploaded_template.name]
-                if existing:
-                    for t in custom_templates:
-                        if t['name'] == uploaded_template.name:
-                            t['file_data'] = uploaded_template.getvalue()
-                            break
-                    save_table('custom_templates', custom_templates)
-                    st.success("模板已更新")
-                else:
-                    custom_templates.append(template_data)
-                    save_table('custom_templates', custom_templates)
-                    st.success("模板已保存")
-                st.rerun()
-    with col2:
-        if custom_templates:
-            st.write("**已保存的模板**")
-            for t in custom_templates:
-                st.write(f"- {t['name']}")
-            if st.button("删除所有模板"):
-                save_table('custom_templates', [])
-                st.success("已删除")
-                st.rerun()
-        else:
-            st.info("暂无自定义模板")
 
 st.caption(f"📁 数据库位置：`{DB_PATH}`（请妥善备份）")
