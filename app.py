@@ -7,6 +7,7 @@ import uuid
 import sqlite3
 import os
 import zipfile
+import re
 
 # ---------- 数据库路径 ----------
 DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
@@ -86,7 +87,7 @@ def get_audit_logs():
     conn.close()
     return df.to_dict('records') if not df.empty else []
 
-# ===== 专为“全地区版”定制的规则导入 =====
+# ===== 彻底重写的规则导入（直接匹配您的列名） =====
 def import_rules_from_excel(xls):
     rule_sheet = None
     for sheet in ["基础配置表", "规则", "城市规则", "配置表"]:
@@ -97,43 +98,58 @@ def import_rules_from_excel(xls):
         return 0, "未找到「基础配置表」"
 
     try:
-        df_rules = pd.read_excel(xls, sheet_name=rule_sheet)
-        # 直接匹配您的列名
+        # 读取整个Sheet，不设header
+        df_full = pd.read_excel(xls, sheet_name=rule_sheet, header=None)
+        
+        # 寻找表头行：包含"所属城市"和"养老保险-单位比例"的行
+        header_row_idx = None
+        for i in range(len(df_full)):
+            row_text = ' '.join([str(v) for v in df_full.iloc[i].values if pd.notna(v)])
+            if '所属城市' in row_text and ('养老保险' in row_text or '公积金' in row_text):
+                header_row_idx = i
+                break
+        
+        if header_row_idx is None:
+            return 0, "未找到包含列名的行（需要包含‘所属城市’和‘养老保险-单位比例’等）"
+        
+        # 重新读取，用找到的行作为表头
+        df_rules = pd.read_excel(xls, sheet_name=rule_sheet, skiprows=header_row_idx)
+        # 将列名转换为字符串，去除空白，并去掉可能的多余换行
+        df_rules.columns = [str(c).strip().replace('\n', '') for c in df_rules.columns]
+        
+        # 打印列名以便调试（在Streamlit中不可见，但可在日志中查看）
+        print("规则表列名:", df_rules.columns.tolist())
+        
+        # 列名映射 - 使用更宽松的匹配
         col_map = {}
         for col in df_rules.columns:
-            col_lower = str(col).lower().strip()
+            col_lower = col.lower().strip()
+            # 城市
             if '所属城市' in col_lower or '城市' in col_lower:
                 col_map['城市'] = col
-            elif '养老保险-单位比例' in col_lower:
+            # 养老保险
+            elif '养老保险-单位' in col_lower or '养老单位' in col_lower or '单位养老' in col_lower:
                 col_map['单位社保比例'] = col
-            elif '养老保险-个人比例' in col_lower:
+            elif '养老保险-个人' in col_lower or '养老个人' in col_lower or '个人养老' in col_lower:
                 col_map['个人社保比例'] = col
-            elif '医疗保险-单位比例' in col_lower:
-                col_map['医疗单位比例'] = col
-            elif '医疗保险-个人比例' in col_lower:
-                col_map['医疗个人比例'] = col
-            elif '失业保险-单位比例' in col_lower:
-                col_map['失业单位比例'] = col
-            elif '失业保险-个人比例' in col_lower:
-                col_map['失业个人比例'] = col
-            elif '工伤保险-单位比例' in col_lower:
-                col_map['工伤单位比例'] = col
-            elif '生育保险-单位比例' in col_lower:
-                col_map['生育单位比例'] = col
-            elif '公积金-单位比例' in col_lower:
+            # 公积金
+            elif '公积金-单位' in col_lower or '单位公积金' in col_lower:
                 col_map['单位公积金比例'] = col
-            elif '公积金-个人比例' in col_lower:
+            elif '公积金-个人' in col_lower or '个人公积金' in col_lower:
                 col_map['个人公积金比例'] = col
-            elif '缴费基数下限' in col_lower:
+            # 基数上下限
+            elif '缴费基数下限' in col_lower or '下限' in col_lower:
                 col_map['社保最低基数'] = col
-            elif '缴费基数上限' in col_lower:
+            elif '缴费基数上限' in col_lower or '上限' in col_lower:
                 col_map['社保最高基数'] = col
-
+        
+        # 检查必要列
         required = ['城市', '单位社保比例', '个人社保比例', '单位公积金比例', '个人公积金比例']
         missing = [r for r in required if r not in col_map]
         if missing:
-            return 0, f"缺少必要列：{', '.join(missing)}，请检查表头行是否正确"
-
+            return 0, f"缺少必要列：{', '.join(missing)}。检测到的列名：{list(df_rules.columns)}"
+        
+        # 构建规则列表
         rules_list = []
         for idx, row in df_rules.iterrows():
             city = row[col_map['城市']]
@@ -146,9 +162,9 @@ def import_rules_from_excel(xls):
                 personal_fund = float(row[col_map['个人公积金比例']])
                 social_min = float(row[col_map['社保最低基数']]) if col_map.get('社保最低基数') is not None and not pd.isna(row[col_map['社保最低基数']]) else 0
                 social_max = float(row[col_map['社保最高基数']]) if col_map.get('社保最高基数') is not None and not pd.isna(row[col_map['社保最高基数']]) else 999999
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as e:
                 continue
-
+            
             rules_list.append({
                 "id": str(uuid.uuid4())[:8],
                 "province": city,
@@ -164,6 +180,7 @@ def import_rules_from_excel(xls):
                 "fund_max": 999999,
                 "source_quote": f"自动从{rule_sheet}导入"
             })
+        
         if rules_list:
             save_table('rules', rules_list)
             return len(rules_list), None
@@ -225,7 +242,7 @@ with tab1:
                     st.success(f"✅ 成功从「基础配置表」导入 {count} 个城市的规则！")
                     rules_data = load_table('rules')
                 else:
-                    st.warning(f"⚠️ 规则导入：{error_msg}，请检查「基础配置表」列名是否正确")
+                    st.warning(f"⚠️ 规则导入：{error_msg}")
 
             if selected_sheet:
                 df_data = pd.read_excel(uploaded, sheet_name=selected_sheet)
@@ -293,11 +310,7 @@ with tab1:
                     summary_list = []
                     errors = []
 
-                    # 确定列名（根据您的实际列名）
-                    # 社保单位合计、社保个人合计、公积金单位、公积金个人、总费用等
-                    # 您的“月度明细数据表”中有：社保合计-单位部分, 社保合计-个人部分, 公积金-单位部分, 公积金-个人部分, 社保+公积金合计-总金额
-                    # 也可能使用“月度汇总报表(12月单月)”中的列：社保单位合计, 社保个人合计, 公积金单位合计, 公积金个人合计, 社保+公积金总金额
-                    # 我们智能查找
+                    # 查找列名
                     def find_col(possible_names):
                         for name in possible_names:
                             for col in df_data.columns:
@@ -323,7 +336,6 @@ with tab1:
                             errors.append(f"{city}: 无数据")
                             continue
 
-                        # 汇总
                         total_people = city_data[col_people].sum() if col_people else len(city_data)
                         total_social_unit = city_data[col_social_unit].sum() if col_social_unit else 0
                         total_social_personal = city_data[col_social_personal].sum() if col_social_personal else 0
@@ -331,11 +343,9 @@ with tab1:
                         total_fund_personal = city_data[col_fund_personal].sum() if col_fund_personal else 0
                         total_cost = city_data[col_total].sum() if col_total else (total_social_unit + total_social_personal + total_fund_unit + total_fund_personal)
 
-                        # 匹配规则（用于显示来源）
                         matched = rule_df[(rule_df['city'] == city) & (rule_df['report_type'] == '月度申报')]
                         source_quote = matched.iloc[0]['source_quote'] if not matched.empty else '未匹配规则'
 
-                        # 生成Excel
                         wb = Workbook()
                         ws = wb.active
                         ws.title = "汇总报表"
@@ -348,7 +358,6 @@ with tab1:
                         ws.append(['公积金个人', round(total_fund_personal, 2)])
                         ws.append(['总费用', round(total_cost, 2)])
 
-                        # 审计日志
                         audit = wb.create_sheet("AuditTrail")
                         audit.append(["时间", "操作", "详情"])
                         audit.append([datetime.now().isoformat(), "GENERATED", f"城市:{city}, 规则来源:{source_quote}"])
@@ -363,7 +372,6 @@ with tab1:
                         fname = f"{city}_{year}{month or ''}.xlsx"
                         generated_files.append((fname, output.getvalue()))
 
-                        # 保存历史
                         export_id = str(uuid.uuid4())[:8]
                         record = {
                             "id": export_id,
