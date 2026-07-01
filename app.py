@@ -141,6 +141,83 @@ def smart_column_mapping(df, required_cols, user_mapping=None):
                 mapping[std_name] = None
         return mapping
 
+# ===== 自动导入规则（从Excel的"基础配置表"） =====
+def import_rules_from_excel(xls):
+    """
+    从Excel的"基础配置表"Sheet导入城市规则
+    返回导入的城市数量
+    """
+    if "基础配置表" not in xls.sheet_names:
+        return 0
+    
+    df_rules = pd.read_excel(xls, sheet_name="基础配置表")
+    # 跳过前几行标题行（如果存在）
+    # 寻找表头行：包含"城市"、"社保基数下限"等关键字
+    header_row = 0
+    for i, row in df_rules.iterrows():
+        row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
+        if '城市' in row_text and '社保基数下限' in row_text:
+            header_row = i
+            break
+    # 重新读取并跳过前header_row行
+    df_rules = pd.read_excel(xls, sheet_name="基础配置表", skiprows=header_row)
+    # 列名映射
+    col_map = {}
+    for col in df_rules.columns:
+        col_lower = str(col).lower()
+        if '城市' in col_lower:
+            col_map['城市'] = col
+        elif '社保基数下限' in col_lower or '社保最低基数' in col_lower:
+            col_map['社保最低基数'] = col
+        elif '社保基数上限' in col_lower or '社保最高基数' in col_lower:
+            col_map['社保最高基数'] = col
+        elif '养老单位比例' in col_lower or '单位养老' in col_lower:
+            col_map['单位社保比例'] = col
+        elif '养老个人比例' in col_lower or '个人养老' in col_lower:
+            col_map['个人社保比例'] = col
+        elif '公积金单位比例' in col_lower or '单位公积金' in col_lower:
+            col_map['单位公积金比例'] = col
+        elif '公积金个人比例' in col_lower or '个人公积金' in col_lower:
+            col_map['个人公积金比例'] = col
+        elif '公积金基数下限' in col_lower:
+            col_map['公积金最低基数'] = col
+        elif '公积金基数上限' in col_lower:
+            col_map['公积金最高基数'] = col
+    
+    # 检查必要列是否都存在
+    required = ['城市', '单位社保比例', '个人社保比例', '单位公积金比例', '个人公积金比例',
+                '社保最低基数', '社保最高基数', '公积金最低基数', '公积金最高基数']
+    if not all(k in col_map for k in required):
+        st.warning("基础配置表列名不完整，请手动导入规则。")
+        return 0
+    
+    # 构建规则列表
+    rules_list = []
+    for _, row in df_rules.iterrows():
+        city = row[col_map['城市']]
+        if pd.isna(city):
+            continue
+        rules_list.append({
+            "id": str(uuid.uuid4())[:8],
+            "province": city,  # 省份简单使用城市名
+            "city": city,
+            "report_type": "月度申报",  # 默认月度
+            "unit_social": float(row[col_map['单位社保比例']]),
+            "personal_social": float(row[col_map['个人社保比例']]),
+            "unit_fund": float(row[col_map['单位公积金比例']]),
+            "personal_fund": float(row[col_map['个人公积金比例']]),
+            "social_min": float(row[col_map['社保最低基数']]),
+            "social_max": float(row[col_map['社保最高基数']]),
+            "fund_min": float(row[col_map['公积金最低基数']]),
+            "fund_max": float(row[col_map['公积金最高基数']]),
+            "source_quote": "自动从基础配置表导入"
+        })
+    
+    if rules_list:
+        save_table('rules', rules_list)
+        return len(rules_list)
+    return 0
+
 # ---------- 初始化 ----------
 init_db()
 if not load_table('companies'):
@@ -149,21 +226,13 @@ if not load_table('companies'):
         {"id": "c002", "company_name": "深圳科技公司", "province": "广东", "city": "深圳市", "district": "南山区"}
     ])
 if not load_table('rules'):
-    save_table('rules', [
-        {"id": "r001", "province": "上海", "city": "上海市", "report_type": "月度申报",
-         "unit_social": 0.16, "personal_social": 0.08, "unit_fund": 0.07, "personal_fund": 0.07,
-         "social_min": 7310, "social_max": 36549, "fund_min": 2590, "fund_max": 34188,
-         "source_quote": "沪人社规〔2024〕22号"},
-        {"id": "r002", "province": "广东", "city": "深圳市", "report_type": "月度申报",
-         "unit_social": 0.14, "personal_social": 0.08, "unit_fund": 0.05, "personal_fund": 0.05,
-         "social_min": 2360, "social_max": 29727, "fund_min": 2360, "fund_max": 29727,
-         "source_quote": "深人社规〔2024〕3号"}
-    ])
+    # 仅当无规则时初始化示例，但有了自动导入后，会覆盖
+    save_table('rules', [])
 
 # ---------- Streamlit 页面 ----------
 st.set_page_config(page_title="本地社保报表系统", layout="wide")
 st.title("📋 本地社保公积金报表系统（智能版）")
-st.markdown("🔒 **支持从Excel自动导入公司、规则和数据，直接匹配**")
+st.markdown("🔒 **上传Excel后自动导入公司、规则和数据，一键生成报表**")
 
 # 仪表盘
 history = get_export_history()
@@ -188,14 +257,15 @@ with tab1:
     rules_data = load_table('rules')
     custom_templates = load_table('custom_templates')
     
-    st.subheader("📤 1. 上传数据（自动识别公司、城市、员工）")
-    st.caption("上传Excel后，系统自动提取公司列表并导入，无需手动添加")
+    st.subheader("📤 1. 上传数据（自动导入公司 + 规则）")
+    st.caption("上传Excel后，系统自动提取公司列表，并自动导入基础配置表中的城市规则")
     uploaded = st.file_uploader("选择文件（.xlsx, .xls, .csv, .txt）", type=["xlsx", "xls", "csv", "txt"])
     
     df_raw = None
     df_std = None
     sheets = []
     selected_sheet = None
+    rules_imported = False
     
     if uploaded:
         try:
@@ -206,6 +276,20 @@ with tab1:
                 selected_sheet = st.selectbox("选择Sheet", sheets, index=0)
                 if selected_sheet:
                     df_raw = pd.read_excel(uploaded, sheet_name=selected_sheet)
+                
+                # ===== 自动导入规则 =====
+                if "基础配置表" in xls.sheet_names:
+                    with st.spinner("正在自动导入城市规则..."):
+                        count = import_rules_from_excel(xls)
+                        if count > 0:
+                            st.success(f"✅ 成功导入 {count} 个城市的规则！")
+                            rules_imported = True
+                            # 刷新规则数据
+                            rules_data = load_table('rules')
+                        else:
+                            st.warning("基础配置表解析失败，请手动导入规则。")
+                else:
+                    st.info("未检测到'基础配置表'，请手动导入规则（在'管理数据'中）。")
             elif file_ext == 'csv':
                 df_raw = pd.read_csv(uploaded, encoding='utf-8-sig')
             elif file_ext == 'txt':
@@ -337,7 +421,7 @@ with tab1:
                     # 匹配规则
                     matched = rule_df[(rule_df['city'] == city) & (rule_df['report_type'] == report_type)]
                     if matched.empty:
-                        errors.append(f"{company_name}: 未找到 {city} 的规则")
+                        errors.append(f"{company_name}: 未找到 {city} 的规则，请先在'管理数据'中导入规则")
                         continue
                     rule = matched.iloc[0]
                     
