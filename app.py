@@ -5,282 +5,192 @@ from openpyxl import Workbook
 from io import BytesIO
 import json
 
-# ---------- 1. 内置全国城市数据（省 → 市 → 区） ----------
-CITIES = {
-    "北京": {"北京市": ["东城区", "西城区", "朝阳区", "海淀区", "丰台区", "石景山区", "通州区", "大兴区", "昌平区", "顺义区", "房山区", "门头沟区", "怀柔区", "平谷区", "密云区", "延庆区"]},
-    "上海": {"上海市": ["浦东新区", "黄浦区", "徐汇区", "长宁区", "静安区", "普陀区", "虹口区", "杨浦区", "宝山区", "闵行区", "嘉定区", "松江区", "青浦区", "奉贤区", "金山区", "崇明区"]},
-    "天津": {"天津市": ["和平区", "河东区", "河西区", "南开区", "河北区", "红桥区", "东丽区", "西青区", "津南区", "北辰区", "武清区", "宝坻区", "滨海新区", "宁河区", "静海区", "蓟州区"]},
-    "重庆": {"重庆市": ["渝中区", "江北区", "沙坪坝区", "九龙坡区", "南岸区", "北碚区", "綦江区", "大足区", "渝北区", "巴南区", "万州区", "涪陵区", "永川区", "合川区", "江津区"]},
-    "广东": {
-        "广州市": ["天河区", "白云区", "番禺区", "花都区", "南沙区", "黄埔区", "海珠区", "荔湾区", "越秀区", "增城区", "从化区"],
-        "深圳市": ["南山区", "福田区", "罗湖区", "宝安区", "龙岗区", "盐田区", "龙华区", "坪山区", "光明区"],
-        "东莞市": ["南城街道", "莞城街道", "万江街道", "东城街道"],
-        "佛山市": ["禅城区", "南海区", "顺德区", "三水区", "高明区"],
-        "珠海市": ["香洲区", "金湾区", "斗门区"],
-        "中山市": ["石岐街道", "东区街道", "西区街道"],
-        "惠州市": ["惠城区", "惠阳区", "博罗县", "惠东县", "龙门县"],
-        "江门市": ["蓬江区", "江海区", "新会区", "台山市", "开平市", "鹤山市", "恩平市"],
-        "湛江市": ["赤坎区", "霞山区", "坡头区", "麻章区", "吴川市", "廉江市", "雷州市"],
-        "茂名市": ["茂南区", "电白区", "高州市", "化州市", "信宜市"],
-        "肇庆市": ["端州区", "鼎湖区", "高要区", "广宁县", "怀集县", "封开县", "德庆县", "四会市"],
-        "汕头市": ["金平区", "龙湖区", "濠江区", "潮阳区", "潮南区", "澄海区", "南澳县"],
-        "潮州市": ["湘桥区", "潮安区", "饶平县"],
-        "揭阳市": ["榕城区", "揭东区", "揭西县", "惠来县", "普宁市"],
-        "汕尾市": ["城区", "海丰县", "陆河县", "陆丰市"],
-        "韶关市": ["武江区", "浈江区", "曲江区", "始兴县", "仁化县", "翁源县", "乳源县", "新丰县", "乐昌市", "南雄市"],
-        "河源市": ["源城区", "紫金县", "龙川县", "连平县", "和平县", "东源县"],
-        "梅州市": ["梅江区", "梅县区", "大埔县", "丰顺县", "五华县", "平远县", "蕉岭县", "兴宁市"],
-        "阳江市": ["江城区", "阳东区", "阳西县", "阳春市"],
-        "清远市": ["清城区", "清新区", "佛冈县", "阳山县", "连南瑶族自治县", "连山壮族瑶族自治县", "英德市", "连州市"],
-        "中山市": ["石岐街道", "东区街道", "西区街道"],
-        "云浮市": ["云城区", "云安区", "新兴县", "郁南县", "罗定市"],
-        "揭阳市": ["榕城区", "揭东区", "揭西县", "惠来县", "普宁市"],
-    },
-    "浙江": {
-        "杭州市": ["上城区", "拱墅区", "西湖区", "滨江区", "萧山区", "余杭区", "临平区", "钱塘区", "富阳区", "临安区", "桐庐县", "淳安县", "建德市"],
-        "宁波市": ["海曙区", "江北区", "北仑区", "镇海区", "鄞州区", "奉化区", "余姚市", "慈溪市", "象山县", "宁海县"],
-        "温州市": ["鹿城区", "龙湾区", "瓯海区", "洞头区", "永嘉县", "平阳县", "苍南县", "文成县", "泰顺县", "瑞安市", "乐清市", "龙港市"],
-        "嘉兴市": ["南湖区", "秀洲区", "嘉善县", "海盐县", "海宁市", "平湖市", "桐乡市"],
-        "湖州市": ["吴兴区", "南浔区", "德清县", "长兴县", "安吉县"],
-        "绍兴市": ["越城区", "柯桥区", "上虞区", "新昌县", "诸暨市", "嵊州市"],
-        "金华市": ["婺城区", "金东区", "武义县", "浦江县", "磐安县", "兰溪市", "义乌市", "东阳市", "永康市"],
-        "衢州市": ["柯城区", "衢江区", "常山县", "开化县", "龙游县", "江山市"],
-        "舟山市": ["定海区", "普陀区", "岱山县", "嵊泗县"],
-        "台州市": ["椒江区", "黄岩区", "路桥区", "三门县", "天台县", "仙居县", "温岭市", "临海市", "玉环市"],
-        "丽水市": ["莲都区", "青田县", "缙云县", "遂昌县", "松阳县", "云和县", "庆元县", "景宁畲族自治县", "龙泉市"],
-    },
-    "江苏": {
-        "南京市": ["玄武区", "秦淮区", "建邺区", "鼓楼区", "栖霞区", "雨花台区", "江宁区", "浦口区", "六合区", "溧水区", "高淳区"],
-        "苏州市": ["姑苏区", "虎丘区", "吴中区", "相城区", "吴江区", "苏州工业园区", "常熟市", "张家港市", "昆山市", "太仓市"],
-        "无锡市": ["梁溪区", "锡山区", "惠山区", "滨湖区", "新吴区", "江阴市", "宜兴市"],
-        "常州市": ["天宁区", "武进区", "新北区", "钟楼区", "金坛区", "溧阳市"],
-        "南通市": ["崇川区", "港闸区", "通州区", "海门区", "启东市", "如皋市", "海安市", "如东县"],
-        "徐州市": ["云龙区", "鼓楼区", "泉山区", "铜山区", "贾汪区", "丰县", "沛县", "睢宁县", "新沂市", "邳州市"],
-        "扬州市": ["广陵区", "邗江区", "江都区", "宝应县", "仪征市", "高邮市"],
-        "镇江市": ["京口区", "润州区", "丹徒区", "丹阳市", "扬中市", "句容市"],
-        "泰州市": ["海陵区", "高港区", "姜堰区", "兴化市", "靖江市", "泰兴市"],
-        "盐城市": ["亭湖区", "盐都区", "大丰区", "响水县", "滨海县", "阜宁县", "射阳县", "建湖县", "东台市"],
-        "淮安市": ["清江浦区", "淮安区", "淮阴区", "洪泽区", "涟水县", "盱眙县", "金湖县"],
-        "连云港市": ["海州区", "连云区", "赣榆区", "东海县", "灌云县", "灌南县"],
-        "宿迁市": ["宿城区", "宿豫区", "沭阳县", "泗阳县", "泗洪县"],
-    },
-    # 其他省份... 为了简洁，这里只列部分，实际部署时可完全展开
-    "四川": {
-        "成都市": ["锦江区", "青羊区", "金牛区", "武侯区", "成华区", "龙泉驿区", "青白江区", "新都区", "温江区", "双流区", "郫都区", "新津区", "简阳市", "都江堰市", "彭州市", "邛崃市", "崇州市", "金堂县", "大邑县", "蒲江县"],
-        "绵阳市": ["涪城区", "游仙区", "安州区", "三台县", "盐亭县", "梓潼县", "北川羌族自治县", "平武县", "江油市"],
-        "德阳市": ["旌阳区", "罗江区", "中江县", "广汉市", "什邡市", "绵竹市"],
-        # ...
-    },
-    "湖北": {
-        "武汉市": ["江岸区", "江汉区", "硚口区", "汉阳区", "武昌区", "青山区", "洪山区", "东西湖区", "汉南区", "蔡甸区", "江夏区", "黄陂区", "新洲区"],
-        "宜昌市": ["西陵区", "伍家岗区", "点军区", "猇亭区", "夷陵区", "远安县", "兴山县", "秭归县", "长阳土家族自治县", "五峰土家族自治县", "宜都市", "当阳市", "枝江市"],
-        "襄阳市": ["襄城区", "樊城区", "襄州区", "南漳县", "谷城县", "保康县", "老河口市", "枣阳市", "宜城市"],
-        # ...
-    },
-    # 其他省份同样展开...
-}
+# ---------- 初始化会话状态 ----------
+if "data_initialized" not in st.session_state:
+    st.session_state.sources = [
+        {"省份": "上海", "城市": "上海市", "机构": "上海市税务局", "来源": "https://shanghai.chinatax.gov.cn/"},
+        {"省份": "广东", "城市": "广州市", "机构": "广东省税务局", "来源": "https://guangdong.chinatax.gov.cn/"},
+        {"省份": "浙江", "城市": "丽水市", "机构": "浙江省税务局", "来源": "https://zhejiang.chinatax.gov.cn/"},
+    ]
+    st.session_state.templates = [
+        {"省份": "上海", "城市": "上海市", "模板名称": "上海市社保申报表（月度）", "报表类型": "月度申报", "版本": "1.0", "必填字段": "单位名称,统一信用代码,险种,基数,单位金额,个人金额"},
+        {"省份": "广东", "城市": "广州市", "模板名称": "广东省社保申报表", "报表类型": "月度申报", "版本": "1.0", "必填字段": "单位名称,统一信用代码,险种,基数,单位金额,个人金额"},
+    ]
+    st.session_state.rules = [
+        {"省份": "上海", "城市": "上海市", "报表类型": "月度申报", "规则": "养老16%/8%，医疗9.5%/2%，失业0.5%/0.5%，工伤0.2%/0，生育1%/0，公积金7%/7%", "来源引用": "沪人社规〔2024〕22号"},
+        {"省份": "广东", "城市": "广州市", "报表类型": "月度申报", "规则": "养老14%/8%，医疗5.5%/2%，失业0.32%/0.2%，工伤0.16%/0，生育0.85%/0，公积金5%-12%", "来源引用": "粤人社规〔2024〕8号"},
+    ]
+    st.session_state.companies = [
+        {"公司名称": "上海科技公司", "省份": "上海", "城市": "上海市", "区县": "浦东新区"},
+        {"公司名称": "广州科技公司", "省份": "广东", "城市": "广州市", "区县": "天河区"},
+    ]
+    st.session_state.data_initialized = True
 
-# ---------- 2. 内置官方模板库（按城市/省份） ----------
-# 优先级：城市专属 > 省份通用 > 国家通用
-TEMPLATE_LIBRARY = {
-    # 国家通用模板（兜底）
-    "国家通用": {
-        "模板名称": "全国通用社会保险费申报表",
-        "版本": "1.0",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位16%，个人8%；医疗保险单位8%，个人2%；失业保险单位0.5%，个人0.5%；工伤保险单位0.2%，个人0；生育保险单位0.8%，个人0；住房公积金单位12%，个人12%",
-        "来源引用": "国家通用标准（2024）",
-        "来源网址": "https://www.chinatax.gov.cn/"
-    },
-    # 省份通用（以广东为例）
-    "广东通用": {
-        "模板名称": "广东省社会保险费申报表（通用）",
-        "版本": "1.0",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位14%，个人8%；医疗保险单位5.5%，个人2%；失业保险单位0.32%，个人0.2%；工伤保险单位0.16%，个人0；生育保险单位0.85%，个人0；住房公积金单位5%-12%，个人5%-12%",
-        "来源引用": "粤人社规〔2024〕8号",
-        "来源网址": "https://guangdong.chinatax.gov.cn/"
-    },
-    "上海通用": {
-        "模板名称": "上海市社会保险费申报表（通用）",
-        "版本": "1.0",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位16%，个人8%；医疗保险单位9.5%，个人2%；失业保险单位0.5%，个人0.5%；工伤保险单位0.2%，个人0；生育保险单位1%，个人0；住房公积金单位7%，个人7%",
-        "来源引用": "沪人社规〔2024〕22号",
-        "来源网址": "https://shanghai.chinatax.gov.cn/"
-    },
-    "北京通用": {
-        "模板名称": "北京市社会保险费申报表（通用）",
-        "版本": "1.0",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位16%，个人8%；医疗保险单位9.8%，个人2%；失业保险单位0.5%，个人0.5%；工伤保险单位0.2%，个人0；生育保险单位0.8%，个人0；住房公积金单位12%，个人12%",
-        "来源引用": "京人社发〔2024〕15号",
-        "来源网址": "https://beijing.chinatax.gov.cn/"
-    },
-    # 城市专属模板（示例：广州市、深圳市）
-    "广州": {
-        "模板名称": "广州市社会保险费申报表（专属）",
-        "版本": "1.1",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位14%，个人8%；医疗保险单位5.5%，个人2%；失业保险单位0.32%，个人0.2%；工伤保险单位0.16%，个人0；生育保险单位0.85%，个人0；住房公积金单位5%-12%，个人5%-12%",
-        "来源引用": "穗人社规〔2024〕3号",
-        "来源网址": "https://guangzhou.chinatax.gov.cn/"
-    },
-    "深圳": {
-        "模板名称": "深圳市社会保险费申报表（专属）",
-        "版本": "1.2",
-        "必填字段": ["单位名称", "社保号", "险种", "基数", "单位缴纳", "个人缴纳"],
-        "规则": "养老保险单位15%，个人8%；医疗保险单位6%，个人2%；失业保险单位0.7%，个人0.3%；工伤保险单位0.1%，个人0；生育保险单位0.45%，个人0；住房公积金单位5%-12%，个人5%-12%",
-        "来源引用": "深人社规〔2024〕3号",
-        "来源网址": "https://shenzhen.chinatax.gov.cn/"
-    },
-    "上海": {
-        "模板名称": "上海市社会保险费申报表（专属）",
-        "版本": "1.0",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位16%，个人8%；医疗保险单位9.5%，个人2%；失业保险单位0.5%，个人0.5%；工伤保险单位0.2%，个人0；生育保险单位1%，个人0；住房公积金单位7%，个人7%",
-        "来源引用": "沪人社规〔2024〕22号",
-        "来源网址": "https://shanghai.chinatax.gov.cn/"
-    },
-    "北京": {
-        "模板名称": "北京市社会保险费申报表（专属）",
-        "版本": "1.0",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位16%，个人8%；医疗保险单位9.8%，个人2%；失业保险单位0.5%，个人0.5%；工伤保险单位0.2%，个人0；生育保险单位0.8%，个人0；住房公积金单位12%，个人12%",
-        "来源引用": "京人社发〔2024〕15号",
-        "来源网址": "https://beijing.chinatax.gov.cn/"
-    },
-    "杭州": {
-        "模板名称": "杭州市社会保险费申报表（专属）",
-        "版本": "1.0",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位14%，个人8%；医疗保险单位9.5%，个人2%；失业保险单位0.5%，个人0.5%；工伤保险单位0.2%，个人0；生育保险单位0.6%，个人0；住房公积金单位5%-12%，个人5%-12%",
-        "来源引用": "杭人社发〔2024〕6号",
-        "来源网址": "https://hangzhou.chinatax.gov.cn/"
-    },
-    "南京": {
-        "模板名称": "南京市社会保险费申报表（专属）",
-        "版本": "1.0",
-        "必填字段": ["单位名称", "统一信用代码", "险种", "基数", "单位金额", "个人金额", "合计"],
-        "规则": "养老保险单位16%，个人8%；医疗保险单位8%，个人2%；失业保险单位0.5%，个人0.5%；工伤保险单位0.16%，个人0；生育保险单位0.5%，个人0；住房公积金单位8%-12%，个人8%-12%",
-        "来源引用": "宁人社发〔2024〕5号",
-        "来源网址": "https://nanjing.chinatax.gov.cn/"
-    },
-    # 可以继续添加更多城市专属模板...
-}
-
-# ---------- 3. 智能匹配函数 ----------
-def smart_match_template(province, city):
-    """
-    匹配优先级：城市专属 > 省份通用 > 国家通用
-    """
-    # 1. 城市专属
-    if city in TEMPLATE_LIBRARY:
-        return TEMPLATE_LIBRARY[city], "城市专属"
-    # 2. 省份通用
-    province_key = f"{province}通用"
-    if province_key in TEMPLATE_LIBRARY:
-        return TEMPLATE_LIBRARY[province_key], "省份通用"
-    # 3. 国家通用
-    return TEMPLATE_LIBRARY["国家通用"], "国家通用"
-
-# ---------- 4. Streamlit 页面 ----------
+# ---------- 页面 ----------
 st.set_page_config(page_title="智能社保报表匹配", layout="wide")
 st.title("🧠 智能社保报表匹配系统")
 st.markdown("**自动选择地区 → 智能匹配官方模板 → 一键生成带审计日志的Excel**")
 
-# 选择地区
-col1, col2, col3 = st.columns(3)
-with col1:
-    provinces = sorted(CITIES.keys())
-    province = st.selectbox("省份", provinces)
-with col2:
-    cities = sorted(CITIES[province].keys())
-    city = st.selectbox("城市", cities)
-with col3:
-    districts = CITIES[province][city]
-    district = st.selectbox("区县", districts)
+tab1, tab2 = st.tabs(["📊 生成报表", "✏️ 管理数据"])
 
-# 报表参数
-col4, col5, col6 = st.columns(3)
-with col4:
+# ==================== 标签页1：生成报表 ====================
+with tab1:
+    # 从 session_state 读取数据
+    companies_df = pd.DataFrame(st.session_state.companies)
+    templates_df = pd.DataFrame(st.session_state.templates)
+    rules_df = pd.DataFrame(st.session_state.rules)
+
+    if companies_df.empty:
+        st.warning("请先在「管理数据」标签页中添加公司信息。")
+        st.stop()
+
+    province = st.selectbox("省份", sorted(companies_df["省份"].unique()))
+    cities = sorted(companies_df[companies_df["省份"] == province]["城市"].unique())
+    city = st.selectbox("城市", cities)
+    districts = sorted(companies_df[(companies_df["省份"] == province) & (companies_df["城市"] == city)]["区县"].unique())
+    district = st.selectbox("区县", districts)
+    companies = companies_df[(companies_df["省份"] == province) & (companies_df["城市"] == city) & (companies_df["区县"] == district)]["公司名称"].tolist()
+    company = st.selectbox("公司", companies)
     report_type = st.selectbox("报表类型", ["月度申报", "年度汇算"])
-with col5:
-    year = st.selectbox("年份", [2025, 2024, 2023], index=1)
-with col6:
+    year = st.selectbox("年份", [2025, 2024, 2023], index=0)
+    month = None
     if report_type == "月度申报":
         month = st.selectbox("月份", list(range(1,13)), index=11)
-    else:
-        month = None
-        st.write("年度汇算无月份")
 
-# 匹配按钮
-if st.button("🔍 智能匹配模板"):
-    template, match_level = smart_match_template(province, city)
-    
-    st.success(f"✅ 匹配成功！匹配级别：**{match_level}**")
-    st.info(f"📌 模板名称：{template['模板名称']} (v{template['版本']})")
-    st.info(f"📌 规则：{template['规则']}")
-    st.info(f"📌 来源：{template['来源引用']} → [{template['来源网址']}]({template['来源网址']})")
-    st.write(f"**必填字段**：{', '.join(template['必填字段'])}")
+    if st.button("智能匹配模板"):
+        template = templates_df[(templates_df["城市"] == city) & (templates_df["报表类型"] == report_type)]
+        rule = rules_df[(rules_df["城市"] == city) & (rules_df["报表类型"] == report_type)]
+        if not template.empty and not rule.empty:
+            st.success("✅ 匹配成功！")
+            tpl = template.iloc[0]
+            rul = rule.iloc[0]
+            st.write(f"**模板**：{tpl['模板名称']} (v{tpl['版本']})")
+            st.write(f"**必填字段**：{tpl['必填字段']}")
+            st.write(f"**规则**：{rul['规则']}")
+            st.write(f"**来源**：{rul['来源引用']}")
+            
+            if st.button("生成假数据Excel（待复核版）"):
+                wb = Workbook()
+                ws = wb.active
+                ws.append(['公司', '险种', '基数', '单位金额', '个人金额'])
+                ws.append([company, '养老保险', 8000, 1280, 640])
+                ws.insert_rows(1)
+                ws['A1'] = '⚠️ 待复核版'
+                ws.merge_cells('A1:E1')
+                audit = wb.create_sheet('AuditTrail')
+                audit.append(['时间', '操作'])
+                audit.append([datetime.now().isoformat(), '生成'])
+                output = BytesIO()
+                wb.save(output)
+                output.seek(0)
+                st.download_button("下载Excel", data=output, file_name=f"{company}_待复核.xlsx")
+        else:
+            st.error("未匹配到模板，请先在「管理数据」中添加。")
 
-    # 生成Excel
-    if st.button("📥 生成待复核版 Excel（假数据）"):
-        wb = Workbook()
-        ws = wb.active
-        
-        # 构建假数据
-        fields = template['必填字段']
-        # 生成一条示例数据
-        sample_data = {
-            "单位名称": f"{city}科技有限公司",
-            "统一信用代码": "91310115MA1KXXXXX",
-            "社保号": "SH123456",
-            "险种": "养老保险",
-            "基数": 8000,
-            "单位金额": 1280,
-            "个人金额": 640,
-            "合计": 1920,
-            "单位缴纳": 1280,
-            "个人缴纳": 640,
-            "年度": year,
-            "缴费基数合计": 96000,
-            "单位缴纳合计": 15360,
-            "个人缴纳合计": 7680,
-        }
-        # 填充表头
-        ws.append(fields)
-        # 填充一行数据
-        row_data = [sample_data.get(f, "") for f in fields]
-        ws.append(row_data)
-        
-        # 水印
-        ws.insert_rows(1)
-        ws['A1'] = '⚠️ 待复核版 (仅供核对，不可正式交付)'
-        ws.merge_cells(f'A1:{chr(65+len(fields)-1)}1')
-        
-        # 审计日志
-        audit = wb.create_sheet('AuditTrail')
-        audit.append(['时间戳', '操作', '详情'])
-        audit.append([datetime.now().isoformat(), 'GENERATED', f'地区:{province}{city}{district}, 模板:{template["模板名称"]}({match_level})'])
-        
-        output = BytesIO()
-        wb.save(output)
-        output.seek(0)
-        st.download_button(
-            label="点击下载 Excel",
-            data=output,
-            file_name=f"{province}_{city}_{year}{month or ''}_待复核.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# ==================== 标签页2：管理数据 ====================
+with tab2:
+    st.subheader("📝 添加或修改数据")
+    st.info("在这里添加新的城市、公司、模板、规则。修改后会自动保存。")
+
+    # 公司管理
+    with st.expander("🏢 公司管理"):
+        edited_companies = st.data_editor(
+            st.session_state.companies,
+            num_rows="dynamic",
+            key="company_editor",
+            use_container_width=True
         )
-        st.balloons()
+        if st.button("保存公司数据"):
+            st.session_state.companies = edited_companies
+            st.success("已更新！")
 
-# 显示当前内置的城市和模板概况（便于了解）
-with st.expander("📋 查看内置数据概览"):
-    st.subheader("城市覆盖")
-    st.write(f"共 {len(CITIES)} 个省份，{sum(len(v) for v in CITIES.values())} 个城市")
-    st.subheader("模板库")
-    st.dataframe(pd.DataFrame([
-        {"名称": k, "版本": v["版本"], "类型": "专属" if "通用" not in k else "通用"}
-        for k, v in TEMPLATE_LIBRARY.items()
-    ]))
+    # 模板管理
+    with st.expander("📄 模板管理"):
+        edited_templates = st.data_editor(
+            st.session_state.templates,
+            num_rows="dynamic",
+            key="template_editor",
+            use_container_width=True
+        )
+        if st.button("保存模板数据"):
+            st.session_state.templates = edited_templates
+            st.success("已更新！")
+
+    # 规则管理
+    with st.expander("⚖️ 规则管理"):
+        edited_rules = st.data_editor(
+            st.session_state.rules,
+            num_rows="dynamic",
+            key="rule_editor",
+            use_container_width=True
+        )
+        if st.button("保存规则数据"):
+            st.session_state.rules = edited_rules
+            st.success("已更新！")
+
+    # 来源管理
+    with st.expander("🔗 官方来源"):
+        edited_sources = st.data_editor(
+            st.session_state.sources,
+            num_rows="dynamic",
+            key="source_editor",
+            use_container_width=True
+        )
+        if st.button("保存来源数据"):
+            st.session_state.sources = edited_sources
+            st.success("已更新！")
+
+    # ---------- 导入Excel功能 ----------
+    with st.expander("📤 批量导入 Excel（自动分步解析）"):
+        st.markdown("上传包含 `公司`、`模板`、`规则`、`来源` 四个 Sheet 的 Excel 文件，系统自动解析并填充。")
+        uploaded_file = st.file_uploader("选择 Excel 文件", type=["xlsx"])
+        if uploaded_file is not None:
+            try:
+                xls = pd.ExcelFile(uploaded_file)
+                required_sheets = ["公司", "模板", "规则"]
+                missing = [s for s in required_sheets if s not in xls.sheet_names]
+                if missing:
+                    st.error(f"缺少 Sheet：{', '.join(missing)}，请确保 Excel 包含这些 Sheet。")
+                else:
+                    df_companies = pd.read_excel(uploaded_file, sheet_name="公司")
+                    df_templates = pd.read_excel(uploaded_file, sheet_name="模板")
+                    df_rules = pd.read_excel(uploaded_file, sheet_name="规则")
+                    df_sources = pd.read_excel(uploaded_file, sheet_name="来源") if "来源" in xls.sheet_names else pd.DataFrame()
+
+                    st.subheader("预览数据")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**公司**")
+                        st.dataframe(df_companies.head(5))
+                    with col2:
+                        st.write("**模板**")
+                        st.dataframe(df_templates.head(5))
+                    col3, col4 = st.columns(2)
+                    with col3:
+                        st.write("**规则**")
+                        st.dataframe(df_rules.head(5))
+                    with col4:
+                        st.write("**来源**")
+                        st.dataframe(df_sources.head(5))
+
+                    if st.button("✅ 确认导入（将覆盖当前数据）"):
+                        st.session_state.companies = df_companies.to_dict(orient="records")
+                        st.session_state.templates = df_templates.to_dict(orient="records")
+                        st.session_state.rules = df_rules.to_dict(orient="records")
+                        if not df_sources.empty:
+                            st.session_state.sources = df_sources.to_dict(orient="records")
+                        st.success(f"成功导入 {len(df_companies)} 家公司，{len(df_templates)} 个模板，{len(df_rules)} 条规则。")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"解析失败：{e}")
+
+    # 导出代码
+    st.subheader("💾 导出当前数据为代码")
+    code_snippet = f"""
+# ---------- 您的自定义数据 ----------
+st.session_state.sources = {json.dumps(st.session_state.sources, ensure_ascii=False, indent=2)}
+st.session_state.templates = {json.dumps(st.session_state.templates, ensure_ascii=False, indent=2)}
+st.session_state.rules = {json.dumps(st.session_state.rules, ensure_ascii=False, indent=2)}
+st.session_state.companies = {json.dumps(st.session_state.companies, ensure_ascii=False, indent=2)}
+"""
+    st.code(code_snippet, language="python")
