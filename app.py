@@ -165,72 +165,71 @@ def import_rules_from_excel(xls):
         if '城市' in row_text and ('社保基数' in row_text or '基数' in row_text):
             header_row = i
             break
-    # 重新读取
+    # 重新读取，使用header_row作为表头行
     df_rules = pd.read_excel(xls, sheet_name=rule_sheet, skiprows=header_row)
-    # 列名映射
-    col_map = {}
-    # 定义标准列名和可能出现的别名
-    alias_dict = {
-        '城市': ['城市', '城市名', '所属城市'],
-        '社保最低基数': ['社保基数下限', '社保最低基数', '社保下限', '最低基数'],
-        '社保最高基数': ['社保基数上限', '社保最高基数', '社保上限', '最高基数'],
-        '单位社保比例': ['养老单位比例', '单位养老', '单位社保比例', '单位社保', '养老保险单位比例'],
-        '个人社保比例': ['养老个人比例', '个人养老', '个人社保比例', '个人社保', '养老保险个人比例'],
-        '单位公积金比例': ['公积金单位比例', '单位公积金', '单位公积金比例', '公积金单位', '住房公积金单位比例'],
-        '个人公积金比例': ['公积金个人比例', '个人公积金', '个人公积金比例', '公积金个人', '住房公积金个人比例'],
-        '公积金最低基数': ['公积金基数下限', '公积金最低基数', '公积金下限'],
-        '公积金最高基数': ['公积金基数上限', '公积金最高基数', '公积金上限']
-    }
-    # 优先精确匹配
-    for std_name, aliases in alias_dict.items():
-        for col in df_rules.columns:
-            col_lower = str(col).lower().strip()
-            if col_lower == std_name.lower():
-                col_map[std_name] = col
-                break
-        if std_name not in col_map:
-            for col in df_rules.columns:
-                col_lower = str(col).lower().strip()
-                for alias in aliases:
-                    if alias.lower() in col_lower or col_lower in alias.lower():
-                        col_map[std_name] = col
-                        break
-                if std_name in col_map:
-                    break
     
-    # 检查必要列是否都存在（城市、单位社保比例、个人社保比例、单位公积金比例、个人公积金比例）
+    # 将列名标准化为小写以便匹配
+    df_rules.columns = [str(col).strip() for col in df_rules.columns]
+    
+    # 定义标准列名和对应的可能列名
+    col_mapping = {}
+    # 直接根据您Excel中的实际列名设置映射
+    # 您的基础配置表列名：城市, 社保基数下限, 社保基数上限, 养老单位比例, 养老个人比例, 医疗单位比例, ...
+    # 我们需要映射到系统所需的列名
+    for col in df_rules.columns:
+        col_lower = col.lower()
+        if '城市' in col_lower:
+            col_mapping['城市'] = col
+        elif '社保基数下限' in col_lower:
+            col_mapping['社保最低基数'] = col
+        elif '社保基数上限' in col_lower:
+            col_mapping['社保最高基数'] = col
+        elif '养老单位比例' in col_lower or '单位养老' in col_lower:
+            col_mapping['单位社保比例'] = col
+        elif '养老个人比例' in col_lower or '个人养老' in col_lower:
+            col_mapping['个人社保比例'] = col
+        elif '公积金单位比例' in col_lower or '单位公积金' in col_lower:
+            col_mapping['单位公积金比例'] = col
+        elif '公积金个人比例' in col_lower or '个人公积金' in col_lower:
+            col_mapping['个人公积金比例'] = col
+        elif '公积金基数下限' in col_lower:
+            col_mapping['公积金最低基数'] = col
+        elif '公积金基数上限' in col_lower:
+            col_mapping['公积金最高基数'] = col
+    
+    # 检查必要列是否都存在
     required = ['城市', '单位社保比例', '个人社保比例', '单位公积金比例', '个人公积金比例']
-    missing = [r for r in required if r not in col_map]
+    missing = [r for r in required if r not in col_mapping]
     if missing:
-        return 0, f"缺少必要列：{', '.join(missing)}，请确保表格包含这些列"
+        return 0, f"缺少必要列：{', '.join(missing)}，请确保表格包含这些列（或等价列名，如'养老单位比例'）"
     
     # 对于上下限，如果缺失则使用默认值 0 和 999999
-    if '社保最低基数' not in col_map:
-        col_map['社保最低基数'] = None
-    if '社保最高基数' not in col_map:
-        col_map['社保最高基数'] = None
-    if '公积金最低基数' not in col_map:
-        col_map['公积金最低基数'] = None
-    if '公积金最高基数' not in col_map:
-        col_map['公积金最高基数'] = None
+    if '社保最低基数' not in col_mapping:
+        col_mapping['社保最低基数'] = None
+    if '社保最高基数' not in col_mapping:
+        col_mapping['社保最高基数'] = None
+    if '公积金最低基数' not in col_mapping:
+        col_mapping['公积金最低基数'] = None
+    if '公积金最高基数' not in col_mapping:
+        col_mapping['公积金最高基数'] = None
     
     # 构建规则列表
     rules_list = []
     for idx, row in df_rules.iterrows():
-        city = row[col_map['城市']]
+        city = row[col_mapping['城市']]
         if pd.isna(city):
             continue
         try:
-            unit_social = float(row[col_map['单位社保比例']])
-            personal_social = float(row[col_map['个人社保比例']])
-            unit_fund = float(row[col_map['单位公积金比例']])
-            personal_fund = float(row[col_map['个人公积金比例']])
-        except (ValueError, TypeError):
+            unit_social = float(row[col_mapping['单位社保比例']])
+            personal_social = float(row[col_mapping['个人社保比例']])
+            unit_fund = float(row[col_mapping['单位公积金比例']])
+            personal_fund = float(row[col_mapping['个人公积金比例']])
+        except (ValueError, TypeError) as e:
             continue
-        social_min = float(row[col_map['社保最低基数']]) if col_map['社保最低基数'] is not None and not pd.isna(row[col_map['社保最低基数']]) else 0
-        social_max = float(row[col_map['社保最高基数']]) if col_map['社保最高基数'] is not None and not pd.isna(row[col_map['社保最高基数']]) else 999999
-        fund_min = float(row[col_map['公积金最低基数']]) if col_map['公积金最低基数'] is not None and not pd.isna(row[col_map['公积金最低基数']]) else 0
-        fund_max = float(row[col_map['公积金最高基数']]) if col_map['公积金最高基数'] is not None and not pd.isna(row[col_map['公积金最高基数']]) else 999999
+        social_min = float(row[col_mapping['社保最低基数']]) if col_mapping['社保最低基数'] is not None and not pd.isna(row[col_mapping['社保最低基数']]) else 0
+        social_max = float(row[col_mapping['社保最高基数']]) if col_mapping['社保最高基数'] is not None and not pd.isna(row[col_mapping['社保最高基数']]) else 999999
+        fund_min = float(row[col_mapping['公积金最低基数']]) if col_mapping['公积金最低基数'] is not None and not pd.isna(row[col_mapping['公积金最低基数']]) else 0
+        fund_max = float(row[col_mapping['公积金最高基数']]) if col_mapping['公积金最高基数'] is not None and not pd.isna(row[col_mapping['公积金最高基数']]) else 999999
         
         rules_list.append({
             "id": str(uuid.uuid4())[:8],
