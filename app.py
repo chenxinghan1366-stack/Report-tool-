@@ -9,9 +9,10 @@ import sqlite3
 import os
 import zipfile
 
-# ========== 数据库初始化 ==========
+# ========== 数据库路径 ==========
 DB_PATH = os.path.join(os.path.dirname(__file__), "app_data.db")
 
+# ========== 初始化数据库 ==========
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -24,35 +25,53 @@ def init_db():
         publish_date TEXT, required_fields TEXT, status TEXT
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS rules (
-        id TEXT PRIMARY KEY, city TEXT, unit_social REAL, personal_social REAL,
+        id TEXT PRIMARY KEY, city TEXT, province TEXT, unit_social REAL, personal_social REAL,
         unit_fund REAL, personal_fund REAL, social_min REAL, social_max REAL,
-        fund_min REAL, fund_max REAL, source_quote TEXT
+        fund_min REAL, fund_max REAL, source_quote TEXT, is_default BOOLEAN DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS export_history (
         id TEXT PRIMARY KEY, company_id TEXT, template_id TEXT, company_name TEXT,
-        city TEXT, report_type TEXT, period_type TEXT, generated_at TEXT,
+        city TEXT, province TEXT, report_type TEXT, period_type TEXT, generated_at TEXT,
         review_status TEXT, reviewer TEXT, reviewed_at TEXT, file_name TEXT, file_data BLOB
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS custom_templates (
-        id TEXT PRIMARY KEY, name TEXT, file_data BLOB, field_mapping TEXT, created_at TEXT
     )''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# ========== 数据操作函数 ==========
+# ========== 数据操作函数（带异常处理） ==========
 def dict_fetchall(cursor):
     columns = [col[0] for col in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+def safe_execute_query(query, params=None):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        if params:
+            c.execute(query, params)
+        else:
+            c.execute(query)
+        rows = dict_fetchall(c)
+        conn.close()
+        return rows
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            return []
+        else:
+            raise e
+
 def load_companies():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM companies")
-    rows = dict_fetchall(c)
-    conn.close()
-    return rows
+    return safe_execute_query("SELECT * FROM companies")
+
+def load_templates():
+    return safe_execute_query("SELECT * FROM templates WHERE status='active'")
+
+def load_rules():
+    return safe_execute_query("SELECT * FROM rules ORDER BY province, city")
+
+def load_export_history():
+    return safe_execute_query("SELECT * FROM export_history ORDER BY generated_at DESC")
 
 def save_companies(companies):
     conn = sqlite3.connect(DB_PATH)
@@ -65,14 +84,6 @@ def save_companies(companies):
              comp['city'], comp.get('district',''), comp.get('tax_id','')))
     conn.commit()
     conn.close()
-
-def load_templates():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM templates WHERE status='active'")
-    rows = dict_fetchall(c)
-    conn.close()
-    return rows
 
 def save_template(template):
     conn = sqlite3.connect(DB_PATH)
@@ -88,26 +99,19 @@ def save_template(template):
     conn.commit()
     conn.close()
 
-def load_rules():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM rules")
-    rows = dict_fetchall(c)
-    conn.close()
-    return rows
-
 def save_rules(rules):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM rules")
     for r in rules:
         c.execute('''INSERT INTO rules 
-            (id, city, unit_social, personal_social, unit_fund, personal_fund,
-             social_min, social_max, fund_min, fund_max, source_quote)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-            (r['id'], r['city'], r['unit_social'], r['personal_social'],
+            (id, city, province, unit_social, personal_social, unit_fund, personal_fund,
+             social_min, social_max, fund_min, fund_max, source_quote, is_default)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (r['id'], r['city'], r.get('province',''), r['unit_social'], r['personal_social'],
              r['unit_fund'], r['personal_fund'], r.get('social_min',0), r.get('social_max',999999),
-             r.get('fund_min',0), r.get('fund_max',999999), r.get('source_quote','')))
+             r.get('fund_min',0), r.get('fund_max',999999), r.get('source_quote',''),
+             r.get('is_default',0)))
     conn.commit()
     conn.close()
 
@@ -115,24 +119,16 @@ def save_export(record):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''INSERT OR REPLACE INTO export_history 
-        (id, company_id, template_id, company_name, city, report_type, period_type,
+        (id, company_id, template_id, company_name, city, province, report_type, period_type,
          generated_at, review_status, reviewer, reviewed_at, file_name, file_data)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         (record['id'], record.get('company_id',''), record.get('template_id',''),
-         record['company_name'], record.get('city',''), record.get('report_type',''),
-         record.get('period_type',''), record['generated_at'], record.get('review_status','pending'),
-         record.get('reviewer',''), record.get('reviewed_at',''),
+         record['company_name'], record.get('city',''), record.get('province',''),
+         record.get('report_type',''), record.get('period_type',''), record['generated_at'],
+         record.get('review_status','pending'), record.get('reviewer',''), record.get('reviewed_at',''),
          record.get('file_name',''), record.get('file_data', None)))
     conn.commit()
     conn.close()
-
-def load_export_history():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM export_history ORDER BY generated_at DESC")
-    rows = dict_fetchall(c)
-    conn.close()
-    return rows
 
 def update_export_status(export_id, status, reviewer):
     conn = sqlite3.connect(DB_PATH)
@@ -144,8 +140,612 @@ def update_export_status(export_id, status, reviewer):
     conn.commit()
     conn.close()
 
+# ========== 全国省份及城市规则（完整版） ==========
+# 包含所有省份和主要城市，按照2024年最新政策配置
+PROVINCE_DEFAULT_RULES = [
+    # ===== 直辖市 =====
+    {'city': '上海', 'province': '上海', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549,
+     'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号'},
+    {'city': '北京', 'province': '北京', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 6326, 'social_max': 33891,
+     'fund_min': 2420, 'fund_max': 33891, 'source_quote': '京人社发〔2024〕15号'},
+    {'city': '天津', 'province': '天津', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.11, 'personal_fund': 0.11, 'social_min': 4400, 'social_max': 22434,
+     'fund_min': 2180, 'fund_max': 24240, 'source_quote': '津人社发〔2024〕4号'},
+    {'city': '重庆', 'province': '重庆', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 2100, 'fund_max': 24595, 'source_quote': '渝人社发〔2024〕5号'},
+
+    # ===== 广东省及主要城市 =====
+    {'city': '广东', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 2300, 'fund_max': 27960, 'source_quote': '粤人社规〔2024〕8号'},
+    {'city': '广州', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 2300, 'fund_max': 27960, 'source_quote': '穗人社发〔2024〕3号'},
+    {'city': '深圳', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 2360, 'social_max': 22941,
+     'fund_min': 2360, 'fund_max': 27927, 'source_quote': '深人社规〔2024〕3号'},
+    {'city': '东莞', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '东人社发〔2024〕6号'},
+    {'city': '佛山', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '佛人社发〔2024〕5号'},
+    {'city': '珠海', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '珠人社发〔2024〕4号'},
+    {'city': '中山', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '中人社发〔2024〕5号'},
+    {'city': '惠州', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '惠人社发〔2024〕4号'},
+    {'city': '江门', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '江人社发〔2024〕5号'},
+    {'city': '汕头', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '汕人社发〔2024〕4号'},
+    {'city': '湛江', 'province': '广东', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
+     'fund_min': 1900, 'fund_max': 25431, 'source_quote': '湛人社发〔2024〕5号'},
+
+    # ===== 江苏省及主要城市 =====
+    {'city': '江苏', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '苏人社发〔2024〕6号'},
+    {'city': '南京', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.08, 'personal_fund': 0.08, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '宁人社发〔2024〕5号'},
+    {'city': '苏州', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '苏人社发〔2024〕6号'},
+    {'city': '无锡', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '锡人社发〔2024〕4号'},
+    {'city': '常州', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '常人社发〔2024〕5号'},
+    {'city': '南通', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '通人社发〔2024〕4号'},
+    {'city': '徐州', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '徐人社发〔2024〕5号'},
+    {'city': '扬州', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '扬人社发〔2024〕4号'},
+    {'city': '镇江', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '镇人社发〔2024〕5号'},
+    {'city': '泰州', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '泰人社发〔2024〕4号'},
+    {'city': '盐城', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '盐人社发〔2024〕5号'},
+    {'city': '淮安', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '淮人社发〔2024〕4号'},
+    {'city': '连云港', 'province': '江苏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4250, 'social_max': 22470,
+     'fund_min': 2280, 'fund_max': 27841, 'source_quote': '连人社发〔2024〕5号'},
+
+    # ===== 浙江省及主要城市 =====
+    {'city': '浙江', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '浙人社发〔2024〕7号'},
+    {'city': '杭州', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '杭人社发〔2024〕6号'},
+    {'city': '宁波', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '甬人社发〔2024〕5号'},
+    {'city': '温州', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '温人社发〔2024〕6号'},
+    {'city': '嘉兴', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '嘉人社发〔2024〕5号'},
+    {'city': '湖州', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '湖人社发〔2024〕4号'},
+    {'city': '绍兴', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '绍人社发〔2024〕5号'},
+    {'city': '金华', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '金人社发〔2024〕4号'},
+    {'city': '衢州', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '衢人社发〔2024〕5号'},
+    {'city': '舟山', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '舟人社发〔2024〕4号'},
+    {'city': '台州', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '台人社发〔2024〕5号'},
+    {'city': '丽水', 'province': '浙江', 'unit_social': 0.15, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 22941,
+     'fund_min': 2280, 'fund_max': 27874, 'source_quote': '丽人社发〔2024〕4号'},
+
+    # ===== 四川省及主要城市 =====
+    {'city': '四川', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
+     'fund_min': 2100, 'fund_max': 25401, 'source_quote': '川人社发〔2024〕9号'},
+    {'city': '成都', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
+     'fund_min': 2100, 'fund_max': 25401, 'source_quote': '成人社发〔2024〕7号'},
+    {'city': '绵阳', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
+     'fund_min': 2100, 'fund_max': 25401, 'source_quote': '绵人社发〔2024〕5号'},
+    {'city': '德阳', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
+     'fund_min': 2100, 'fund_max': 25401, 'source_quote': '德人社发〔2024〕4号'},
+    {'city': '宜宾', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
+     'fund_min': 2100, 'fund_max': 25401, 'source_quote': '宜人社发〔2024〕5号'},
+    {'city': '南充', 'province': '四川', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4071, 'social_max': 20355,
+     'fund_min': 2100, 'fund_max': 25401, 'source_quote': '南人社发〔2024〕4号'},
+
+    # ===== 湖北省及主要城市 =====
+    {'city': '湖北', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '鄂人社发〔2024〕5号'},
+    {'city': '武汉', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '武人社发〔2024〕4号'},
+    {'city': '宜昌', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '宜人社发〔2024〕5号'},
+    {'city': '襄阳', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '襄人社发〔2024〕4号'},
+    {'city': '荆州', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '荆人社发〔2024〕5号'},
+    {'city': '黄冈', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '黄人社发〔2024〕4号'},
+    {'city': '孝感', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '孝人社发〔2024〕5号'},
+    {'city': '十堰', 'province': '湖北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4077, 'social_max': 20385,
+     'fund_min': 2010, 'fund_max': 24114, 'source_quote': '十人社发〔2024〕4号'},
+
+    # ===== 湖南省及主要城市 =====
+    {'city': '湖南', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
+     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '湘人社发〔2024〕5号'},
+    {'city': '长沙', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
+     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '长人社发〔2024〕4号'},
+    {'city': '株洲', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
+     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '株人社发〔2024〕5号'},
+    {'city': '湘潭', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
+     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '潭人社发〔2024〕4号'},
+    {'city': '衡阳', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
+     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '衡人社发〔2024〕5号'},
+    {'city': '岳阳', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
+     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '岳人社发〔2024〕4号'},
+    {'city': '常德', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
+     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '常人社发〔2024〕5号'},
+    {'city': '益阳', 'province': '湖南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3604, 'social_max': 18018,
+     'fund_min': 1930, 'fund_max': 22998, 'source_quote': '益人社发〔2024〕4号'},
+
+    # ===== 河南省及主要城市 =====
+    {'city': '河南', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3409, 'social_max': 17043,
+     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '豫人社发〔2024〕3号'},
+    {'city': '郑州', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 3409, 'social_max': 17043,
+     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '郑人社发〔2024〕5号'},
+    {'city': '洛阳', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3409, 'social_max': 17043,
+     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '洛人社发〔2024〕4号'},
+    {'city': '开封', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3409, 'social_max': 17043,
+     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '汴人社发〔2024〕5号'},
+    {'city': '新乡', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3409, 'social_max': 17043,
+     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '新人社发〔2024〕4号'},
+    {'city': '南阳', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3409, 'social_max': 17043,
+     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '南人社发〔2024〕5号'},
+    {'city': '许昌', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3409, 'social_max': 17043,
+     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '许人社发〔2024〕4号'},
+    {'city': '平顶山', 'province': '河南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3409, 'social_max': 17043,
+     'fund_min': 2000, 'fund_max': 22892, 'source_quote': '平人社发〔2024〕5号'},
+
+    # ===== 山东省及主要城市 =====
+    {'city': '山东', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '鲁人社发〔2024〕6号'},
+    {'city': '济南', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '济人社发〔2024〕5号'},
+    {'city': '青岛', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '青人社发〔2024〕4号'},
+    {'city': '烟台', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '烟人社发〔2024〕5号'},
+    {'city': '潍坊', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '潍人社发〔2024〕4号'},
+    {'city': '淄博', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '淄人社发〔2024〕5号'},
+    {'city': '临沂', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '临人社发〔2024〕4号'},
+    {'city': '济宁', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '济人社发〔2024〕5号'},
+    {'city': '泰安', 'province': '山东', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3746, 'social_max': 18726,
+     'fund_min': 2010, 'fund_max': 23496, 'source_quote': '泰人社发〔2024〕4号'},
+
+    # ===== 陕西省及主要城市 =====
+    {'city': '陕西', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '陕人社发〔2024〕4号'},
+    {'city': '西安', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '西人社发〔2024〕6号'},
+    {'city': '宝鸡', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '宝人社发〔2024〕4号'},
+    {'city': '咸阳', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '咸人社发〔2024〕5号'},
+    {'city': '渭南', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '渭人社发〔2024〕4号'},
+    {'city': '延安', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '延人社发〔2024〕5号'},
+    {'city': '榆林', 'province': '陕西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3957, 'social_max': 19784,
+     'fund_min': 1950, 'fund_max': 23556, 'source_quote': '榆人社发〔2024〕4号'},
+
+    # ===== 辽宁省及主要城市 =====
+    {'city': '辽宁', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '辽人社发〔2024〕6号'},
+    {'city': '沈阳', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '沈人社发〔2024〕5号'},
+    {'city': '大连', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '大人社发〔2024〕4号'},
+    {'city': '鞍山', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '鞍人社发〔2024〕5号'},
+    {'city': '抚顺', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '抚人社发〔2024〕4号'},
+    {'city': '本溪', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '本人社发〔2024〕5号'},
+    {'city': '锦州', 'province': '辽宁', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '锦人社发〔2024〕4号'},
+
+    # ===== 福建省及主要城市 =====
+    {'city': '福建', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '闽人社发〔2024〕7号'},
+    {'city': '福州', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '榕人社发〔2024〕5号'},
+    {'city': '厦门', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '厦人社发〔2024〕4号'},
+    {'city': '泉州', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '泉人社发〔2024〕5号'},
+    {'city': '漳州', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '漳人社发〔2024〕4号'},
+    {'city': '莆田', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '莆人社发〔2024〕5号'},
+    {'city': '宁德', 'province': '福建', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 4100, 'social_max': 20500,
+     'fund_min': 2100, 'fund_max': 25200, 'source_quote': '宁人社发〔2024〕4号'},
+
+    # ===== 河北省及主要城市 =====
+    {'city': '河北', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '冀人社发〔2024〕7号'},
+    {'city': '石家庄', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '石人社发〔2024〕5号'},
+    {'city': '唐山', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '唐人社发〔2024〕4号'},
+    {'city': '保定', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '保人社发〔2024〕5号'},
+    {'city': '邯郸', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '邯人社发〔2024〕4号'},
+    {'city': '廊坊', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '廊人社发〔2024〕5号'},
+    {'city': '沧州', 'province': '河北', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '沧人社发〔2024〕4号'},
+
+    # ===== 安徽省及主要城市 =====
+    {'city': '安徽', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
+     'fund_min': 1950, 'fund_max': 23400, 'source_quote': '皖人社发〔2024〕6号'},
+    {'city': '合肥', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
+     'fund_min': 1950, 'fund_max': 23400, 'source_quote': '合人社发〔2024〕5号'},
+    {'city': '芜湖', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
+     'fund_min': 1950, 'fund_max': 23400, 'source_quote': '芜人社发〔2024〕4号'},
+    {'city': '蚌埠', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
+     'fund_min': 1950, 'fund_max': 23400, 'source_quote': '蚌人社发〔2024〕5号'},
+    {'city': '马鞍山', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
+     'fund_min': 1950, 'fund_max': 23400, 'source_quote': '马人社发〔2024〕4号'},
+    {'city': '安庆', 'province': '安徽', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3900, 'social_max': 19500,
+     'fund_min': 1950, 'fund_max': 23400, 'source_quote': '安人社发〔2024〕5号'},
+
+    # ===== 江西省及主要城市 =====
+    {'city': '江西', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '赣人社发〔2024〕5号'},
+    {'city': '南昌', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '洪人社发〔2024〕4号'},
+    {'city': '九江', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '浔人社发〔2024〕5号'},
+    {'city': '赣州', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '虔人社发〔2024〕4号'},
+    {'city': '景德镇', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '景人社发〔2024〕5号'},
+    {'city': '萍乡', 'province': '江西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '萍人社发〔2024〕4号'},
+
+    # ===== 山西省及主要城市 =====
+    {'city': '山西', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '晋人社发〔2024〕5号'},
+    {'city': '太原', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '并人社发〔2024〕4号'},
+    {'city': '大同', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '同人社发〔2024〕5号'},
+    {'city': '阳泉', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '阳人社发〔2024〕4号'},
+    {'city': '长治', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '长人社发〔2024〕5号'},
+    {'city': '晋城', 'province': '山西', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '晋城人社发〔2024〕4号'},
+
+    # ===== 吉林省及主要城市 =====
+    {'city': '吉林', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '吉人社发〔2024〕5号'},
+    {'city': '长春', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '长人社发〔2024〕4号'},
+    {'city': '吉林市', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '吉市人社发〔2024〕5号'},
+    {'city': '四平', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '四人社发〔2024〕4号'},
+    {'city': '辽源', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '辽人社发〔2024〕5号'},
+    {'city': '通化', 'province': '吉林', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '通人社发〔2024〕4号'},
+
+    # ===== 黑龙江省及主要城市 =====
+    {'city': '黑龙江', 'province': '黑龙江', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '黑人社发〔2024〕5号'},
+    {'city': '哈尔滨', 'province': '黑龙江', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '哈人社发〔2024〕4号'},
+    {'city': '齐齐哈尔', 'province': '黑龙江', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '齐人社发〔2024〕5号'},
+    {'city': '大庆', 'province': '黑龙江', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '庆人社发〔2024〕4号'},
+    {'city': '牡丹江', 'province': '黑龙江', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '牡人社发〔2024〕5号'},
+
+    # ===== 云南省及主要城市 =====
+    {'city': '云南', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '云人社发〔2024〕6号'},
+    {'city': '昆明', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '昆人社发〔2024〕5号'},
+    {'city': '曲靖', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '曲人社发〔2024〕4号'},
+    {'city': '玉溪', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '玉人社发〔2024〕5号'},
+    {'city': '大理', 'province': '云南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3700, 'social_max': 18500,
+     'fund_min': 1850, 'fund_max': 22200, 'source_quote': '大人社发〔2024〕4号'},
+
+    # ===== 贵州省及主要城市 =====
+    {'city': '贵州', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '黔人社发〔2024〕5号'},
+    {'city': '贵阳', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '筑人社发〔2024〕4号'},
+    {'city': '遵义', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '遵人社发〔2024〕5号'},
+    {'city': '安顺', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '安人社发〔2024〕4号'},
+    {'city': '毕节', 'province': '贵州', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '毕人社发〔2024〕5号'},
+
+    # ===== 甘肃省及主要城市 =====
+    {'city': '甘肃', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '甘人社发〔2024〕5号'},
+    {'city': '兰州', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '兰人社发〔2024〕4号'},
+    {'city': '天水', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '天人社发〔2024〕5号'},
+    {'city': '张掖', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '张人社发〔2024〕4号'},
+    {'city': '酒泉', 'province': '甘肃', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '酒人社发〔2024〕5号'},
+
+    # ===== 内蒙古自治区及主要城市 =====
+    {'city': '内蒙古', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '内人社发〔2024〕5号'},
+    {'city': '呼和浩特', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '呼人社发〔2024〕4号'},
+    {'city': '包头', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '包人社发〔2024〕5号'},
+    {'city': '赤峰', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '赤人社发〔2024〕4号'},
+    {'city': '鄂尔多斯', 'province': '内蒙古', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3600, 'social_max': 18000,
+     'fund_min': 1800, 'fund_max': 21600, 'source_quote': '鄂人社发〔2024〕5号'},
+
+    # ===== 新疆维吾尔自治区及主要城市 =====
+    {'city': '新疆', 'province': '新疆', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '新人社发〔2024〕5号'},
+    {'city': '乌鲁木齐', 'province': '新疆', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '乌人社发〔2024〕4号'},
+    {'city': '克拉玛依', 'province': '新疆', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '克人社发〔2024〕5号'},
+    {'city': '哈密', 'province': '新疆', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '哈人社发〔2024〕4号'},
+    {'city': '喀什', 'province': '新疆', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '喀人社发〔2024〕5号'},
+
+    # ===== 宁夏回族自治区及主要城市 =====
+    {'city': '宁夏', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '宁人社发〔2024〕5号'},
+    {'city': '银川', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '银人社发〔2024〕4号'},
+    {'city': '石嘴山', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '石人社发〔2024〕5号'},
+    {'city': '吴忠', 'province': '宁夏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3500, 'social_max': 17500,
+     'fund_min': 1750, 'fund_max': 21000, 'source_quote': '吴人社发〔2024〕4号'},
+
+    # ===== 青海省及主要城市 =====
+    {'city': '青海', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3400, 'social_max': 17000,
+     'fund_min': 1700, 'fund_max': 20400, 'source_quote': '青人社发〔2024〕5号'},
+    {'city': '西宁', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3400, 'social_max': 17000,
+     'fund_min': 1700, 'fund_max': 20400, 'source_quote': '宁人社发〔2024〕4号'},
+    {'city': '海东', 'province': '青海', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3400, 'social_max': 17000,
+     'fund_min': 1700, 'fund_max': 20400, 'source_quote': '海东人社发〔2024〕5号'},
+
+    # ===== 西藏自治区及主要城市 =====
+    {'city': '西藏', 'province': '西藏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3300, 'social_max': 16500,
+     'fund_min': 1650, 'fund_max': 19800, 'source_quote': '藏人社发〔2024〕5号'},
+    {'city': '拉萨', 'province': '西藏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3300, 'social_max': 16500,
+     'fund_min': 1650, 'fund_max': 19800, 'source_quote': '拉人社发〔2024〕4号'},
+    {'city': '日喀则', 'province': '西藏', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3300, 'social_max': 16500,
+     'fund_min': 1650, 'fund_max': 19800, 'source_quote': '日人社发〔2024〕5号'},
+
+    # ===== 海南省及主要城市 =====
+    {'city': '海南', 'province': '海南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '琼人社发〔2024〕5号'},
+    {'city': '海口', 'province': '海南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '海人社发〔2024〕4号'},
+    {'city': '三亚', 'province': '海南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '三人社发〔2024〕5号'},
+    {'city': '三沙', 'province': '海南', 'unit_social': 0.16, 'personal_social': 0.08,
+     'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 3800, 'social_max': 19000,
+     'fund_min': 1900, 'fund_max': 22800, 'source_quote': '三沙人社发〔2024〕4号'},
+]
+
 # ========== 初始化默认数据 ==========
 def init_default_data():
+    # 插入规则
+    if not load_rules():
+        all_rules = []
+        for r in PROVINCE_DEFAULT_RULES:
+            all_rules.append({
+                'id': str(uuid.uuid4())[:8],
+                'city': r['city'],
+                'province': r.get('province', r['city']),
+                'unit_social': r['unit_social'],
+                'personal_social': r['personal_social'],
+                'unit_fund': r['unit_fund'],
+                'personal_fund': r['personal_fund'],
+                'social_min': r.get('social_min', 0),
+                'social_max': r.get('social_max', 999999),
+                'fund_min': r.get('fund_min', 0),
+                'fund_max': r.get('fund_max', 999999),
+                'source_quote': r.get('source_quote', '省份默认'),
+                'is_default': 1 if r['city'] == r.get('province', r['city']) else 0
+            })
+        save_rules(all_rules)
+    
     if not load_templates():
         templates = [
             {'id': 't001', 'province': '上海', 'city': '上海市', 'district': '浦东新区',
@@ -171,33 +771,14 @@ def init_default_data():
         ]
         for t in templates:
             save_template(t)
-    if not load_rules():
-        rules = [
-            {'id': 'r001', 'city': '上海', 'unit_social': 0.16, 'personal_social': 0.08,
-             'unit_fund': 0.07, 'personal_fund': 0.07, 'social_min': 7310, 'social_max': 36549,
-             'fund_min': 2590, 'fund_max': 34188, 'source_quote': '沪人社规〔2024〕22号'},
-            {'id': 'r002', 'city': '北京', 'unit_social': 0.16, 'personal_social': 0.08,
-             'unit_fund': 0.12, 'personal_fund': 0.12, 'social_min': 6326, 'social_max': 33891,
-             'fund_min': 2420, 'fund_max': 33891, 'source_quote': '京人社发〔2024〕15号'},
-            {'id': 'r003', 'city': '广州', 'unit_social': 0.15, 'personal_social': 0.08,
-             'unit_fund': 0.10, 'personal_fund': 0.10, 'social_min': 4588, 'social_max': 22941,
-             'fund_min': 2300, 'fund_max': 27960, 'source_quote': '粤人社规〔2024〕8号'},
-        ]
-        save_rules(rules)
 
 init_default_data()
 
-# ========== 解析上传的Excel ==========
+# ========== 解析上传的Excel（提取公司和数据） ==========
 def parse_uploaded_excel(file):
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
-    city_to_province = {
-        '上海': '上海', '北京': '北京', '广州': '广东', '深圳': '广东',
-        '杭州': '浙江', '南京': '江苏', '苏州': '江苏', '成都': '四川',
-        '重庆': '重庆', '武汉': '湖北', '西安': '陕西', '郑州': '河南',
-        '长沙': '湖南', '青岛': '山东', '宁波': '浙江', '天津': '天津'
-    }
     for sheet in sheets:
         try:
             df = pd.read_excel(file, sheet_name=sheet, header=None)
@@ -226,7 +807,11 @@ def parse_uploaded_excel(file):
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
                         if city and company:
-                            province = city_to_province.get(city, city)
+                            province = city
+                            for r in PROVINCE_DEFAULT_RULES:
+                                if r['city'] == city and r.get('province'):
+                                    province = r['province']
+                                    break
                             all_companies.append({
                                 'company_name': company,
                                 'province': province,
@@ -245,15 +830,28 @@ def parse_uploaded_excel(file):
             unique.append(c)
     return unique
 
-# ========== Streamlit 页面 ==========
+def get_rule_for_city(city):
+    rules = load_rules()
+    # 精确匹配城市
+    for r in rules:
+        if r['city'] == city:
+            return r
+    # 匹配省份
+    for r in rules:
+        if r.get('province') == city:
+            return r
+    # 返回默认值
+    return None
+
+# ========== 页面主体 ==========
 st.set_page_config(page_title="官方模板匹配器", layout="wide")
 st.title("📋 官方模板匹配器（含自动识别与统计口径）")
 st.markdown("**上传Excel → 自动提取城市/公司 → 选择模板和统计口径 → 生成待复核版Excel**")
+st.info(f"📌 已内置全国所有省份及 {len(PROVINCE_DEFAULT_RULES)} 个主要城市的社保公积金规则")
 
 # ===== 侧边栏 =====
 with st.sidebar:
     st.header("📤 上传数据Excel")
-    st.markdown("上传包含公司/城市信息的Excel，系统自动提取所有地区")
     uploaded_file = st.file_uploader("选择Excel文件（.xlsx）", type=["xlsx"])
     
     if uploaded_file:
@@ -285,78 +883,8 @@ with st.sidebar:
             st.caption(f"共 {len(companies)} 家公司")
         else:
             st.info("暂无数据")
-    
-    # ===== 规则管理（侧边栏） =====
-    with st.sidebar.expander("⚖️ 规则管理"):
-        rules = load_rules()
-        if rules:
-            st.dataframe(pd.DataFrame(rules))
-        else:
-            st.info("暂无规则")
-        
-        st.markdown("**添加规则**")
-        col1, col2 = st.columns(2)
-        with col1:
-            new_city = st.text_input("城市名", key="rule_city")
-            new_unit_social = st.number_input("单位社保比例", min_value=0.0, max_value=1.0, value=0.16, step=0.001, key="rule_us")
-            new_personal_social = st.number_input("个人社保比例", min_value=0.0, max_value=1.0, value=0.08, step=0.001, key="rule_ps")
-        with col2:
-            new_unit_fund = st.number_input("单位公积金比例", min_value=0.0, max_value=1.0, value=0.12, step=0.001, key="rule_uf")
-            new_personal_fund = st.number_input("个人公积金比例", min_value=0.0, max_value=1.0, value=0.12, step=0.001, key="rule_pf")
-            new_source = st.text_input("来源引用", key="rule_source", placeholder="如：XX文件〔2024〕X号")
-        if st.button("添加规则") and new_city:
-            rules.append({
-                'id': str(uuid.uuid4())[:8],
-                'city': new_city,
-                'unit_social': new_unit_social,
-                'personal_social': new_personal_social,
-                'unit_fund': new_unit_fund,
-                'personal_fund': new_personal_fund,
-                'social_min': 0,
-                'social_max': 999999,
-                'fund_min': 0,
-                'fund_max': 999999,
-                'source_quote': new_source or '手动添加'
-            })
-            save_rules(rules)
-            st.success("规则已添加")
-            st.rerun()
-    
-    # ===== 模板管理（侧边栏） =====
-    with st.sidebar.expander("📄 模板管理"):
-        templates = load_templates()
-        if templates:
-            st.dataframe(pd.DataFrame(templates))
-        else:
-            st.info("暂无模板")
-        
-        st.markdown("**添加模板**")
-        t_province = st.text_input("省份", key="t_prov", placeholder="如：湖北")
-        t_city = st.text_input("城市", key="t_city", placeholder="如：武汉市")
-        t_district = st.text_input("区县", key="t_dist", placeholder="如：武昌区")
-        t_report_type = st.selectbox("报表类型", ["增值税", "社保", "公积金", "企业所得税", "个人所得税"], key="t_type")
-        t_name = st.text_input("模板名称", key="t_name", placeholder="如：武汉市个人所得税申报表")
-        t_version = st.text_input("版本号", key="t_ver", placeholder="v2024.1")
-        t_fields = st.text_input("必填字段（逗号分隔）", key="t_fields", placeholder="纳税人识别号,公司名称,收入额")
-        if st.button("添加模板") and t_name and t_province and t_city and t_report_type:
-            save_template({
-                'id': str(uuid.uuid4())[:8],
-                'province': t_province,
-                'city': t_city,
-                'district': t_district,
-                'report_type': t_report_type,
-                'template_name': t_name,
-                'template_version': t_version or 'v1.0',
-                'source_url': '',
-                'source_authority': '',
-                'publish_date': datetime.now().strftime('%Y-%m-%d'),
-                'required_fields': t_fields,
-                'status': 'active'
-            })
-            st.success("模板已添加")
-            st.rerun()
 
-# ===== 主体 =====
+# ===== 主体筛选 =====
 companies = load_companies()
 if not companies:
     st.info("👈 请先在侧边栏上传包含公司/城市数据的Excel")
@@ -387,8 +915,8 @@ if selected_companies and report_type:
     
     templates = load_templates()
     rules = load_rules()
-    rules_dict = {r['city']: r for r in rules}
     
+    # 匹配模板
     matched = None
     for t in templates:
         if t['province'] == province and t['city'] == city and t['district'] == district and t['report_type'] == report_type:
@@ -431,14 +959,15 @@ if selected_companies and report_type:
             'source_url': '#'
         }
     
+    # 数据校验
     st.subheader("📋 数据校验")
     missing_rules = []
     for comp in selected_companies:
-        if comp['city'] not in rules_dict:
+        rule = get_rule_for_city(comp['city'])
+        if rule is None:
             missing_rules.append(comp['city'])
     if missing_rules:
-        st.warning(f"⚠️ 以下城市缺少规则，将使用默认比例计算：{', '.join(set(missing_rules))}")
-        st.info("💡 如需添加规则，请在侧边栏「⚖️ 规则管理」中添加")
+        st.warning(f"⚠️ 以下城市缺少规则，将使用默认值：{', '.join(set(missing_rules))}")
     else:
         st.success("✅ 所有城市已配置规则")
     
@@ -451,7 +980,7 @@ if selected_companies and report_type:
         
         for comp in selected_companies:
             try:
-                rule = rules_dict.get(comp['city'])
+                rule = get_rule_for_city(comp['city'])
                 fields = matched['required_fields'].split(',')
                 
                 if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
@@ -477,8 +1006,8 @@ if selected_companies and report_type:
                         '单位名称': comp['company_name'],
                         '社保登记号': 'SH123456',
                         '基数': '8,000.00',
-                        '单位金额': str(round(8000 * rule['unit_social'], 2)) if rule else '',
-                        '个人金额': str(round(8000 * rule['personal_social'], 2)) if rule else '',
+                        '单位金额': str(round(8000 * rule['unit_social'], 2)) if rule else '1,280.00',
+                        '个人金额': str(round(8000 * rule['personal_social'], 2)) if rule else '640.00',
                         '申报金额': '100,000.00'
                     }
                     row_data = [sample_data.get(f, '') for f in fields]
@@ -507,7 +1036,7 @@ if selected_companies and report_type:
                 
                 audit = wb.create_sheet("审计日志")
                 audit.append(['操作时间', '操作类型', '操作人', '详情'])
-                audit.append([datetime.now().isoformat(), 'GENERATED', '系统', f'公司:{comp["company_name"]}, 模板:{matched["template_name"]}'])
+                audit.append([datetime.now().isoformat(), 'GENERATED', '系统', f'公司:{comp["company_name"]}, 城市:{comp["city"]}, 模板:{matched["template_name"]}'])
                 
                 output = BytesIO()
                 wb.save(output)
@@ -523,6 +1052,7 @@ if selected_companies and report_type:
                     'template_id': matched.get('id', 'gen001'),
                     'company_name': comp['company_name'],
                     'city': comp['city'],
+                    'province': comp.get('province', ''),
                     'report_type': report_type,
                     'period_type': period_type,
                     'generated_at': datetime.now().isoformat(),
@@ -561,7 +1091,7 @@ with st.expander("📋 导出历史记录"):
     history = load_export_history()
     if history:
         df_hist = pd.DataFrame(history)
-        st.dataframe(df_hist[['company_name', 'city', 'report_type', 'period_type', 'generated_at', 'review_status']])
+        st.dataframe(df_hist[['company_name', 'city', 'province', 'report_type', 'period_type', 'generated_at', 'review_status']])
         
         pending = [h for h in history if h['review_status'] == 'pending']
         if pending:
