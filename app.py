@@ -147,33 +147,40 @@ def import_rules_from_excel(xls):
     从Excel的"基础配置表"Sheet导入城市规则
     返回导入的城市数量
     """
-    if "基础配置表" not in xls.sheet_names:
+    # 支持多种可能的Sheet名称
+    possible_sheets = ["基础配置表", "规则", "城市规则", "规则表", "配置表"]
+    rule_sheet = None
+    for sheet in possible_sheets:
+        if sheet in xls.sheet_names:
+            rule_sheet = sheet
+            break
+    
+    if rule_sheet is None:
         return 0
     
-    df_rules = pd.read_excel(xls, sheet_name="基础配置表")
-    # 跳过前几行标题行（如果存在）
+    df_rules = pd.read_excel(xls, sheet_name=rule_sheet)
     # 寻找表头行：包含"城市"、"社保基数下限"等关键字
     header_row = 0
     for i, row in df_rules.iterrows():
         row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
-        if '城市' in row_text and '社保基数下限' in row_text:
+        if '城市' in row_text and ('社保基数' in row_text or '基数' in row_text):
             header_row = i
             break
     # 重新读取并跳过前header_row行
-    df_rules = pd.read_excel(xls, sheet_name="基础配置表", skiprows=header_row)
-    # 列名映射
+    df_rules = pd.read_excel(xls, sheet_name=rule_sheet, skiprows=header_row)
+    # 列名映射（支持多种列名变体）
     col_map = {}
     for col in df_rules.columns:
         col_lower = str(col).lower()
         if '城市' in col_lower:
             col_map['城市'] = col
-        elif '社保基数下限' in col_lower or '社保最低基数' in col_lower:
+        elif '社保基数下限' in col_lower or '社保最低基数' in col_lower or '下限' in col_lower:
             col_map['社保最低基数'] = col
-        elif '社保基数上限' in col_lower or '社保最高基数' in col_lower:
+        elif '社保基数上限' in col_lower or '社保最高基数' in col_lower or '上限' in col_lower:
             col_map['社保最高基数'] = col
-        elif '养老单位比例' in col_lower or '单位养老' in col_lower:
+        elif '养老单位比例' in col_lower or '单位养老' in col_lower or '单位社保' in col_lower:
             col_map['单位社保比例'] = col
-        elif '养老个人比例' in col_lower or '个人养老' in col_lower:
+        elif '养老个人比例' in col_lower or '个人养老' in col_lower or '个人社保' in col_lower:
             col_map['个人社保比例'] = col
         elif '公积金单位比例' in col_lower or '单位公积金' in col_lower:
             col_map['单位公积金比例'] = col
@@ -187,8 +194,9 @@ def import_rules_from_excel(xls):
     # 检查必要列是否都存在
     required = ['城市', '单位社保比例', '个人社保比例', '单位公积金比例', '个人公积金比例',
                 '社保最低基数', '社保最高基数', '公积金最低基数', '公积金最高基数']
-    if not all(k in col_map for k in required):
-        st.warning("基础配置表列名不完整，请手动导入规则。")
+    # 检查是否所有必需列都已映射
+    missing = [r for r in required if r not in col_map]
+    if missing:
         return 0
     
     # 构建规则列表
@@ -197,21 +205,24 @@ def import_rules_from_excel(xls):
         city = row[col_map['城市']]
         if pd.isna(city):
             continue
-        rules_list.append({
-            "id": str(uuid.uuid4())[:8],
-            "province": city,  # 省份简单使用城市名
-            "city": city,
-            "report_type": "月度申报",  # 默认月度
-            "unit_social": float(row[col_map['单位社保比例']]),
-            "personal_social": float(row[col_map['个人社保比例']]),
-            "unit_fund": float(row[col_map['单位公积金比例']]),
-            "personal_fund": float(row[col_map['个人公积金比例']]),
-            "social_min": float(row[col_map['社保最低基数']]),
-            "social_max": float(row[col_map['社保最高基数']]),
-            "fund_min": float(row[col_map['公积金最低基数']]),
-            "fund_max": float(row[col_map['公积金最高基数']]),
-            "source_quote": "自动从基础配置表导入"
-        })
+        try:
+            rules_list.append({
+                "id": str(uuid.uuid4())[:8],
+                "province": city,
+                "city": city,
+                "report_type": "月度申报",
+                "unit_social": float(row[col_map['单位社保比例']]),
+                "personal_social": float(row[col_map['个人社保比例']]),
+                "unit_fund": float(row[col_map['单位公积金比例']]),
+                "personal_fund": float(row[col_map['个人公积金比例']]),
+                "social_min": float(row[col_map['社保最低基数']]),
+                "social_max": float(row[col_map['社保最高基数']]),
+                "fund_min": float(row[col_map['公积金最低基数']]),
+                "fund_max": float(row[col_map['公积金最高基数']]),
+                "source_quote": f"自动从{rule_sheet}导入"
+            })
+        except (ValueError, TypeError):
+            continue
     
     if rules_list:
         save_table('rules', rules_list)
@@ -226,13 +237,12 @@ if not load_table('companies'):
         {"id": "c002", "company_name": "深圳科技公司", "province": "广东", "city": "深圳市", "district": "南山区"}
     ])
 if not load_table('rules'):
-    # 仅当无规则时初始化示例，但有了自动导入后，会覆盖
     save_table('rules', [])
 
 # ---------- Streamlit 页面 ----------
 st.set_page_config(page_title="本地社保报表系统", layout="wide")
-st.title("📋 本地社保公积金报表系统（智能版）")
-st.markdown("🔒 **上传Excel后自动导入公司、规则和数据，一键生成报表**")
+st.title("📋 本地社保公积金报表系统（全自动版）")
+st.markdown("🔒 **上传Excel后自动识别「基础配置表」导入规则，自动识别公司列表**")
 
 # 仪表盘
 history = get_export_history()
@@ -258,7 +268,7 @@ with tab1:
     custom_templates = load_table('custom_templates')
     
     st.subheader("📤 1. 上传数据（自动导入公司 + 规则）")
-    st.caption("上传Excel后，系统自动提取公司列表，并自动导入基础配置表中的城市规则")
+    st.caption("上传Excel后，系统自动提取公司列表，并自动识别「基础配置表」导入城市规则")
     uploaded = st.file_uploader("选择文件（.xlsx, .xls, .csv, .txt）", type=["xlsx", "xls", "csv", "txt"])
     
     df_raw = None
@@ -277,19 +287,15 @@ with tab1:
                 if selected_sheet:
                     df_raw = pd.read_excel(uploaded, sheet_name=selected_sheet)
                 
-                # ===== 自动导入规则 =====
-                if "基础配置表" in xls.sheet_names:
-                    with st.spinner("正在自动导入城市规则..."):
-                        count = import_rules_from_excel(xls)
-                        if count > 0:
-                            st.success(f"✅ 成功导入 {count} 个城市的规则！")
-                            rules_imported = True
-                            # 刷新规则数据
-                            rules_data = load_table('rules')
-                        else:
-                            st.warning("基础配置表解析失败，请手动导入规则。")
-                else:
-                    st.info("未检测到'基础配置表'，请手动导入规则（在'管理数据'中）。")
+                # ===== 自动导入规则（检测基础配置表） =====
+                with st.spinner("正在自动识别并导入城市规则..."):
+                    count = import_rules_from_excel(xls)
+                    if count > 0:
+                        st.success(f"✅ 成功从「基础配置表」导入 {count} 个城市的规则！")
+                        rules_imported = True
+                        rules_data = load_table('rules')
+                    else:
+                        st.info("未检测到有效的「基础配置表」，如需规则请手动在「管理数据」中导入。")
             elif file_ext == 'csv':
                 df_raw = pd.read_csv(uploaded, encoding='utf-8-sig')
             elif file_ext == 'txt':
@@ -647,25 +653,51 @@ with tab3:
             save_table('rules', edited_rules)
             st.success("已保存")
     
-    with st.expander("📤 批量导入 Excel（公司+规则）"):
+    with st.expander("📤 批量导入 Excel（自动识别公司+规则）"):
+        st.caption("上传Excel后，系统自动识别「公司配置表」和「基础配置表」，无需手动指定Sheet名称")
         uploaded_file = st.file_uploader("选择 Excel", type=["xlsx"], key="import_batch")
         if uploaded_file:
             try:
                 xls = pd.ExcelFile(uploaded_file)
-                if "公司" in xls.sheet_names and "规则" in xls.sheet_names:
-                    df_comp = pd.read_excel(uploaded_file, sheet_name="公司")
-                    df_rule = pd.read_excel(uploaded_file, sheet_name="规则")
-                    df_comp['id'] = [str(uuid.uuid4())[:8] for _ in range(len(df_comp))]
-                    df_rule['id'] = [str(uuid.uuid4())[:8] for _ in range(len(df_rule))]
-                    st.write("预览公司", df_comp.head())
-                    st.write("预览规则", df_rule.head())
-                    if st.button("确认导入"):
-                        save_table('companies', df_comp.to_dict('records'))
-                        save_table('rules', df_rule.to_dict('records'))
-                        st.success("导入成功！")
-                        st.rerun()
+                success_count = 0
+                # ===== 自动识别并导入公司 =====
+                # 查找包含公司信息的Sheet
+                company_sheet = None
+                for sheet in xls.sheet_names:
+                    if '公司' in sheet or '企业' in sheet or '配置' in sheet:
+                        company_sheet = sheet
+                        break
+                
+                if company_sheet:
+                    df_comp = pd.read_excel(uploaded_file, sheet_name=company_sheet)
+                    # 尝试找公司列和城市列
+                    comp_col = None
+                    city_col = None
+                    for col in df_comp.columns:
+                        if '公司' in col or '企业' in col:
+                            comp_col = col
+                        if '城市' in col or '市' in col:
+                            city_col = col
+                    if comp_col and city_col:
+                        df_comp_clean = df_comp[[comp_col, city_col]].drop_duplicates()
+                        df_comp_clean = df_comp_clean.rename(columns={comp_col: 'company_name', city_col: 'city'})
+                        df_comp_clean['province'] = df_comp_clean['city']
+                        df_comp_clean['district'] = '市区'
+                        df_comp_clean['id'] = [str(uuid.uuid4())[:8] for _ in range(len(df_comp_clean))]
+                        save_table('companies', df_comp_clean.to_dict('records'))
+                        st.success(f"✅ 从「{company_sheet}」导入 {len(df_comp_clean)} 家公司")
+                        success_count += 1
+                
+                # ===== 自动识别并导入规则 =====
+                rule_count = import_rules_from_excel(xls)
+                if rule_count > 0:
+                    st.success(f"✅ 从「基础配置表」导入 {rule_count} 个城市的规则")
+                    success_count += 1
+                
+                if success_count == 0:
+                    st.warning("未识别到有效数据，请确保Excel包含「公司配置表」和「基础配置表」")
                 else:
-                    st.warning("需要「公司」和「规则」两个 Sheet")
+                    st.rerun()
             except Exception as e:
                 st.error(f"解析失败：{e}")
 
