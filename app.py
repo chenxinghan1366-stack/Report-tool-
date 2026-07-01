@@ -258,6 +258,9 @@ with tab1:
                         st.success(f"成功提取数据，共 {len(df_data)} 行")
                         st.dataframe(df_data.head(5))
 
+                        # 显示实际列名，帮助调试
+                        st.write("数据列名：", list(df_data.columns))
+
         except Exception as e:
             st.error(f"❌ 读取文件失败：{str(e)}")
 
@@ -270,12 +273,11 @@ with tab1:
         company_col = None
         for col in df_data.columns:
             col_str = str(col)
-            if '城市' in col_str and '所属城市' in col_str:
+            if '所属城市' in col_str:
                 city_col = col
             elif '分公司' in col_str or '公司' in col_str:
                 company_col = col
         
-        # 如果找不到“分公司”列，尝试用“所属城市”代替
         if company_col is None:
             company_col = city_col
             st.info("未找到「分公司」列，将使用「城市」作为公司名称")
@@ -285,13 +287,11 @@ with tab1:
         else:
             # 获取唯一的分公司-城市组合
             if company_col and company_col != city_col:
-                # 使用分公司名称 + 城市作为显示
                 df_company = df_data[[company_col, city_col]].drop_duplicates()
                 df_company['display'] = df_company[company_col] + ' (' + df_company[city_col] + ')'
                 options = df_company['display'].tolist()
                 company_map = {row['display']: (row[company_col], row[city_col]) for _, row in df_company.iterrows()}
             else:
-                # 只有城市
                 cities = df_data[city_col].unique().tolist()
                 options = [c + ' (城市)' for c in cities]
                 company_map = {c + ' (城市)': (c, c) for c in cities}
@@ -314,22 +314,36 @@ with tab1:
                     summary_list = []
                     errors = []
 
+                    # ===== 加强列名查找 =====
                     def find_col(possible_names):
                         for name in possible_names:
+                            # 先精确匹配
+                            for col in df_data.columns:
+                                if col == name:
+                                    return col
+                            # 再忽略大小写和空格匹配
+                            name_clean = name.replace(' ', '').lower()
+                            for col in df_data.columns:
+                                col_clean = str(col).replace(' ', '').lower()
+                                if name_clean == col_clean or name_clean in col_clean:
+                                    return col
+                            # 最后用包含匹配
                             for col in df_data.columns:
                                 if name.lower() in str(col).lower():
                                     return col
                         return None
 
+                    # 查找各列
                     col_people = find_col(['参保人数'])
-                    col_social_unit = find_col(['社保单位合计', '社保合计-单位部分'])
-                    col_social_personal = find_col(['社保个人合计', '社保合计-个人部分'])
-                    col_fund_unit = find_col(['公积金单位合计', '公积金-单位部分'])
-                    col_fund_personal = find_col(['公积金个人合计', '公积金-个人部分'])
-                    col_total = find_col(['社保+公积金合计-总金额', '社保+公积金总金额'])
+                    col_social_unit = find_col(['社保单位合计', '社保合计-单位部分', '社保单位'])
+                    col_social_personal = find_col(['社保个人合计', '社保合计-个人部分', '社保个人'])
+                    col_fund_unit = find_col(['公积金单位合计', '公积金-单位部分', '公积金单位'])
+                    col_fund_personal = find_col(['公积金个人合计', '公积金-个人部分', '公积金个人'])
+                    col_total = find_col(['社保+公积金合计-总金额', '社保+公积金总金额', '总金额'])
 
+                    # 如果还是找不到社保单位合计，尝试用“社保总金额”拆分（但不准确），这里直接报错
                     if col_social_unit is None and col_social_personal is None:
-                        st.error("未找到社保金额列，请确认数据格式")
+                        st.error(f"未找到社保金额列。当前列名：{list(df_data.columns)}")
                         st.stop()
 
                     rule_df = pd.DataFrame(rules_data)
