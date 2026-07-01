@@ -96,7 +96,7 @@ def get_audit_logs():
 def smart_column_mapping(df, required_cols, user_mapping=None):
     df_cols = list(df.columns)
     synonyms = {
-        '公司': ['公司', '企业', '单位', '公司名称', '企业名称', '单位名称', 'name', 'company', '公司名', '所属公司', '公司全称'],
+        '公司': ['公司', '企业', '单位名称', '公司名称', '企业名称', '单位名称', 'name', 'company', '公司名', '所属公司', '公司全称'],
         '城市': ['城市', '市', 'city', '地区', '所属城市', '所在地', '城市名', '城市名称'],
         '姓名': ['姓名', '名字', '员工', 'name', 'employee', '人员', '员工编号', '员工姓名', '员工id'],
         '工资基数': ['工资基数', '基数', '工资', '月工资', '基本工资', 'base', 'salary', '月应发工资', '应发工资', '月薪', '工资总额', '月度工资'],
@@ -141,7 +141,7 @@ def smart_column_mapping(df, required_cols, user_mapping=None):
                 mapping[std_name] = None
         return mapping
 
-# ===== 从Excel自动导入公司（改进版） =====
+# ===== 从Excel自动导入公司 =====
 def import_companies_from_excel(df, city_col, company_col):
     companies = df[[company_col, city_col]].drop_duplicates()
     companies = companies.rename(columns={company_col: 'company_name', city_col: 'city'})
@@ -149,38 +149,6 @@ def import_companies_from_excel(df, city_col, company_col):
     companies['district'] = '市区'
     companies['id'] = [str(uuid.uuid4())[:8] for _ in range(len(companies))]
     return companies.to_dict('records')
-
-# ===== 检测公司列和城市列（增强版，避免误匹配） =====
-def detect_company_city_columns(df):
-    company_col = None
-    city_col = None
-    
-    # 1. 先精确匹配“公司名称”和“所属城市”
-    for col in df.columns:
-        if col == '公司名称' or col == '公司名' or col == '企业名称':
-            company_col = col
-            break
-    if company_col is None:
-        # 2. 模糊匹配，但排除包含“总费用”、“合计”等词
-        for col in df.columns:
-            col_lower = col.lower()
-            if '公司' in col_lower and not '总费用' in col_lower and not '合计' in col_lower and not '单位' in col_lower:
-                company_col = col
-                break
-    
-    # 城市列
-    for col in df.columns:
-        if col == '所属城市' or col == '城市' or col == '市':
-            city_col = col
-            break
-    if city_col is None:
-        for col in df.columns:
-            col_lower = col.lower()
-            if '城市' in col_lower or '市' in col_lower:
-                city_col = col
-                break
-    
-    return company_col, city_col
 
 # ---------- 初始化 ----------
 init_db()
@@ -287,12 +255,38 @@ with tab1:
                     st.success(f"成功提取数据，共 {len(df_raw)} 行")
                     st.dataframe(df_raw.head(5))
                     
-                    # ===== 核心：自动导入公司（使用增强检测） =====
+                    # ===== 核心：自动导入公司（增加手动选择） =====
                     st.subheader("🏢 2. 自动导入公司列表")
-                    company_col, city_col = detect_company_city_columns(df_raw)
+                    
+                    # 让用户手动选择公司列和城市列
+                    columns = list(df_raw.columns)
+                    company_col = st.selectbox("请选择公司名称列", [''] + columns, key="company_col_select")
+                    city_col = st.selectbox("请选择所属城市列", [''] + columns, key="city_col_select")
+                    
+                    # 如果没有手动选择，尝试自动检测
+                    if not company_col:
+                        for col in columns:
+                            if col == '公司名称' or col == '公司名' or col == '企业名称':
+                                company_col = col
+                                break
+                        if not company_col:
+                            for col in columns:
+                                if '公司' in col and not '总费用' in col and not '合计' in col:
+                                    company_col = col
+                                    break
+                    if not city_col:
+                        for col in columns:
+                            if col == '所属城市' or col == '城市' or col == '市':
+                                city_col = col
+                                break
+                        if not city_col:
+                            for col in columns:
+                                if '城市' in col or '市' in col:
+                                    city_col = col
+                                    break
                     
                     if company_col and city_col:
-                        st.info(f"检测到公司列：{company_col}，城市列：{city_col}")
+                        st.info(f"当前使用：公司列 = {company_col}，城市列 = {city_col}")
                         preview_companies = df_raw[[company_col, city_col]].drop_duplicates()
                         st.write("将导入以下公司：")
                         st.dataframe(preview_companies)
@@ -304,7 +298,7 @@ with tab1:
                             auto_imported = True
                             st.rerun()
                     else:
-                        st.warning("未检测到公司列或城市列，请确认数据格式。您也可以在「数据管理」中手动添加公司。")
+                        st.warning("未选择公司列或城市列，请从下拉框中手动选择。")
                     
                     # ===== 列名映射 =====
                     st.subheader("🔍 3. 列名映射（用于生成报表）")
