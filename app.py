@@ -94,7 +94,8 @@ def get_audit_logs():
 
 # ---------- 智能列名映射 ----------
 def smart_column_mapping(df, required_cols):
-    df_cols = list(df.columns)
+    # 确保列名为字符串
+    df_cols = [str(c) for c in df.columns]
     synonyms = {
         '公司': ['公司', '企业', '单位名称', '公司名称', '企业名称', '单位名称', 'name', 'company', '公司名', '所属公司', '公司全称'],
         '城市': ['城市', '市', 'city', '地区', '所属城市', '所在地', '城市名', '城市名称'],
@@ -122,15 +123,13 @@ def smart_column_mapping(df, required_cols):
             mapping[std_name] = None
     return mapping
 
-# ===== 自动导入规则（彻底重写，直接匹配您的列名） =====
+# ===== 自动导入规则（重写，更健壮） =====
 def import_rules_from_excel(xls):
     """
     从Excel的"基础配置表"Sheet导入城市规则
-    直接匹配您Excel中的列名：社保基数下限、养老单位比例等
     """
-    # 查找规则表
-    possible_sheets = ["基础配置表", "规则", "城市规则", "规则表", "配置表"]
     rule_sheet = None
+    possible_sheets = ["基础配置表", "规则", "城市规则", "规则表", "配置表"]
     for sheet in possible_sheets:
         if sheet in xls.sheet_names:
             rule_sheet = sheet
@@ -138,91 +137,93 @@ def import_rules_from_excel(xls):
     if rule_sheet is None:
         return 0, "未找到包含城市规则的Sheet（如「基础配置表」）"
 
-    # 读取整个Sheet，不跳过任何行
-    df_full = pd.read_excel(xls, sheet_name=rule_sheet, header=None)
-    
-    # 寻找表头行：查找包含“城市”且包含“社保基数下限”或“养老单位比例”的行
-    header_row_idx = None
-    for i in range(len(df_full)):
-        row_values = df_full.iloc[i].astype(str).str.lower()
-        row_text = ' '.join(row_values)
-        if '城市' in row_text and ('社保基数下限' in row_text or '养老单位比例' in row_text):
-            header_row_idx = i
-            break
-    
-    if header_row_idx is None:
-        return 0, "未找到包含列名的行（需要包含‘城市’和‘社保基数下限’等）"
-    
-    # 重新读取，使用找到的行作为表头
-    df_rules = pd.read_excel(xls, sheet_name=rule_sheet, skiprows=header_row_idx)
-    # 列名映射
-    col_map = {}
-    for col in df_rules.columns:
-        col_lower = str(col).lower().strip()
-        if '城市' in col_lower:
-            col_map['城市'] = col
-        elif '社保基数下限' in col_lower:
-            col_map['社保最低基数'] = col
-        elif '社保基数上限' in col_lower:
-            col_map['社保最高基数'] = col
-        elif '养老单位比例' in col_lower or '单位养老' in col_lower:
-            col_map['单位社保比例'] = col
-        elif '养老个人比例' in col_lower or '个人养老' in col_lower:
-            col_map['个人社保比例'] = col
-        elif '公积金单位比例' in col_lower or '单位公积金' in col_lower:
-            col_map['单位公积金比例'] = col
-        elif '公积金个人比例' in col_lower or '个人公积金' in col_lower:
-            col_map['个人公积金比例'] = col
-        elif '公积金基数下限' in col_lower:
-            col_map['公积金最低基数'] = col
-        elif '公积金基数上限' in col_lower:
-            col_map['公积金最高基数'] = col
-    
-    # 检查必要列
-    required = ['城市', '单位社保比例', '个人社保比例', '单位公积金比例', '个人公积金比例']
-    missing = [r for r in required if r not in col_map]
-    if missing:
-        return 0, f"缺少必要列：{', '.join(missing)}，请确保表格包含这些列（或等价列名）"
-    
-    # 构建规则列表
-    rules_list = []
-    for idx, row in df_rules.iterrows():
-        city = row[col_map['城市']]
-        if pd.isna(city):
-            continue
-        try:
-            unit_social = float(row[col_map['单位社保比例']])
-            personal_social = float(row[col_map['个人社保比例']])
-            unit_fund = float(row[col_map['单位公积金比例']])
-            personal_fund = float(row[col_map['个人公积金比例']])
-        except (ValueError, TypeError):
-            continue
-        social_min = float(row[col_map['社保最低基数']]) if col_map.get('社保最低基数') is not None and not pd.isna(row[col_map['社保最低基数']]) else 0
-        social_max = float(row[col_map['社保最高基数']]) if col_map.get('社保最高基数') is not None and not pd.isna(row[col_map['社保最高基数']]) else 999999
-        fund_min = float(row[col_map['公积金最低基数']]) if col_map.get('公积金最低基数') is not None and not pd.isna(row[col_map['公积金最低基数']]) else 0
-        fund_max = float(row[col_map['公积金最高基数']]) if col_map.get('公积金最高基数') is not None and not pd.isna(row[col_map['公积金最高基数']]) else 999999
-        
-        rules_list.append({
-            "id": str(uuid.uuid4())[:8],
-            "province": city,
-            "city": city,
-            "report_type": "月度申报",
-            "unit_social": unit_social,
-            "personal_social": personal_social,
-            "unit_fund": unit_fund,
-            "personal_fund": personal_fund,
-            "social_min": social_min,
-            "social_max": social_max,
-            "fund_min": fund_min,
-            "fund_max": fund_max,
-            "source_quote": f"自动从{rule_sheet}导入"
-        })
-    
-    if rules_list:
-        save_table('rules', rules_list)
-        return len(rules_list), None
-    else:
-        return 0, "未解析到有效数据，请检查表格格式"
+    try:
+        # 读取全部数据，不设header
+        df_full = pd.read_excel(xls, sheet_name=rule_sheet, header=None)
+        # 寻找表头行：包含"城市"且包含"社保基数下限"或"养老单位比例"的行
+        header_row_idx = None
+        for i in range(len(df_full)):
+            row_text = ' '.join([str(v) for v in df_full.iloc[i].values if pd.notna(v)])
+            if '城市' in row_text and ('社保基数下限' in row_text or '养老单位比例' in row_text):
+                header_row_idx = i
+                break
+        if header_row_idx is None:
+            return 0, "未找到包含列名的行（需要包含‘城市’和‘社保基数下限’等）"
+
+        # 重新读取，用找到的行作为表头
+        df_rules = pd.read_excel(xls, sheet_name=rule_sheet, skiprows=header_row_idx)
+        # 将列名转换为字符串，并去除空白
+        df_rules.columns = [str(c).strip() for c in df_rules.columns]
+
+        # 列名映射
+        col_map = {}
+        for col in df_rules.columns:
+            col_lower = col.lower()
+            if '城市' in col_lower:
+                col_map['城市'] = col
+            elif '社保基数下限' in col_lower:
+                col_map['社保最低基数'] = col
+            elif '社保基数上限' in col_lower:
+                col_map['社保最高基数'] = col
+            elif '养老单位比例' in col_lower or '单位养老' in col_lower:
+                col_map['单位社保比例'] = col
+            elif '养老个人比例' in col_lower or '个人养老' in col_lower:
+                col_map['个人社保比例'] = col
+            elif '公积金单位比例' in col_lower or '单位公积金' in col_lower:
+                col_map['单位公积金比例'] = col
+            elif '公积金个人比例' in col_lower or '个人公积金' in col_lower:
+                col_map['个人公积金比例'] = col
+            elif '公积金基数下限' in col_lower:
+                col_map['公积金最低基数'] = col
+            elif '公积金基数上限' in col_lower:
+                col_map['公积金最高基数'] = col
+
+        # 检查必要列
+        required = ['城市', '单位社保比例', '个人社保比例', '单位公积金比例', '个人公积金比例']
+        missing = [r for r in required if r not in col_map]
+        if missing:
+            return 0, f"缺少必要列：{', '.join(missing)}，请确保表格包含这些列（或等价列名）"
+
+        # 构建规则列表
+        rules_list = []
+        for idx, row in df_rules.iterrows():
+            city = row[col_map['城市']]
+            if pd.isna(city):
+                continue
+            try:
+                unit_social = float(row[col_map['单位社保比例']])
+                personal_social = float(row[col_map['个人社保比例']])
+                unit_fund = float(row[col_map['单位公积金比例']])
+                personal_fund = float(row[col_map['个人公积金比例']])
+            except (ValueError, TypeError):
+                continue
+            social_min = float(row[col_map['社保最低基数']]) if col_map.get('社保最低基数') is not None and not pd.isna(row[col_map['社保最低基数']]) else 0
+            social_max = float(row[col_map['社保最高基数']]) if col_map.get('社保最高基数') is not None and not pd.isna(row[col_map['社保最高基数']]) else 999999
+            fund_min = float(row[col_map['公积金最低基数']]) if col_map.get('公积金最低基数') is not None and not pd.isna(row[col_map['公积金最低基数']]) else 0
+            fund_max = float(row[col_map['公积金最高基数']]) if col_map.get('公积金最高基数') is not None and not pd.isna(row[col_map['公积金最高基数']]) else 999999
+            
+            rules_list.append({
+                "id": str(uuid.uuid4())[:8],
+                "province": city,
+                "city": city,
+                "report_type": "月度申报",
+                "unit_social": unit_social,
+                "personal_social": personal_social,
+                "unit_fund": unit_fund,
+                "personal_fund": personal_fund,
+                "social_min": social_min,
+                "social_max": social_max,
+                "fund_min": fund_min,
+                "fund_max": fund_max,
+                "source_quote": f"自动从{rule_sheet}导入"
+            })
+        if rules_list:
+            save_table('rules', rules_list)
+            return len(rules_list), None
+        else:
+            return 0, "未解析到有效数据，请检查表格格式"
+    except Exception as e:
+        return 0, f"解析规则时出错：{str(e)}"
 
 # ---------- 初始化 ----------
 init_db()
@@ -281,6 +282,8 @@ with tab1:
                 selected_sheet = st.selectbox("选择Sheet", sheets, index=0)
                 if selected_sheet:
                     df_raw = pd.read_excel(uploaded, sheet_name=selected_sheet)
+                    # 确保列名为字符串
+                    df_raw.columns = [str(c) for c in df_raw.columns]
                 
                 # ===== 自动导入规则（检测基础配置表） =====
                 with st.spinner("正在自动识别并导入城市规则..."):
@@ -290,17 +293,21 @@ with tab1:
                         rules_imported = True
                         rules_data = load_table('rules')
                     else:
-                        st.warning(f"⚠️ 规则导入失败：{error_msg}，如需规则请手动在「管理数据」中导入。")
+                        st.warning(f"⚠️ 规则导入：{error_msg}，如需规则请手动在「管理数据」中导入。")
             elif file_ext == 'csv':
                 df_raw = pd.read_csv(uploaded, encoding='utf-8-sig')
+                df_raw.columns = [str(c) for c in df_raw.columns]
             elif file_ext == 'txt':
                 df_raw = pd.read_csv(uploaded, delimiter='\t', encoding='utf-8-sig')
+                df_raw.columns = [str(c) for c in df_raw.columns]
             
             if df_raw is not None:
                 st.info(f"📊 读取到 {len(df_raw)} 行，{len(df_raw.columns)} 列")
                 st.dataframe(df_raw.head(5))
                 
-                # 自动检测表头行
+                # 自动检测表头行（针对数据Sheet）
+                # 如果当前Sheet是“月度明细数据表”，自动跳过第一行标题（“2025年社保公积金月度缴费明细数据表...”）
+                # 但我们的通用检测逻辑会寻找包含“公司”或“城市”的行作为表头
                 header_row = 0
                 for i, row in df_raw.iterrows():
                     row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
@@ -309,6 +316,7 @@ with tab1:
                         break
                 
                 if header_row == 0:
+                    # 如果没找到，可能是第一行是标题，第二行是数据，让用户手动输入
                     header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=0, step=1)
                 else:
                     st.info(f"自动检测到表头行：第 {header_row} 行")
@@ -317,7 +325,10 @@ with tab1:
                         header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=header_row, step=1)
                 
                 if header_row < len(df_raw):
+                    # 使用检测到的行作为表头
                     new_header = df_raw.iloc[header_row]
+                    # 将表头转换为字符串
+                    new_header = [str(h) for h in new_header]
                     df_raw = df_raw[header_row+1:]
                     df_raw.columns = new_header
                     df_raw = df_raw.reset_index(drop=True)
@@ -332,7 +343,7 @@ with tab1:
                     
                     for std_name, actual_col in col_mapping.items():
                         if actual_col is None or actual_col == '':
-                            options = [''] + list(df_raw.columns)
+                            options = [''] + [str(c) for c in df_raw.columns]
                             selected = st.selectbox(f"请选择 '{std_name}' 对应的列", options, key=f"map_{std_name}_{uploaded.name}")
                             if selected:
                                 col_mapping[std_name] = selected
