@@ -8,7 +8,6 @@ import uuid
 import sqlite3
 import os
 import zipfile
-import json
 
 # ========== 数据库初始化 ==========
 DB_PATH = os.path.join(os.path.dirname(__file__), "app_data.db")
@@ -263,7 +262,6 @@ with st.sidebar:
             if companies:
                 save_companies(companies)
                 st.success(f"成功提取 {len(companies)} 家公司")
-                # 尝试读取数据
                 try:
                     xls = pd.ExcelFile(uploaded_file)
                     data_sheet = None
@@ -287,6 +285,76 @@ with st.sidebar:
             st.caption(f"共 {len(companies)} 家公司")
         else:
             st.info("暂无数据")
+    
+    # ===== 规则管理（侧边栏） =====
+    with st.sidebar.expander("⚖️ 规则管理"):
+        rules = load_rules()
+        if rules:
+            st.dataframe(pd.DataFrame(rules))
+        else:
+            st.info("暂无规则")
+        
+        st.markdown("**添加规则**")
+        col1, col2 = st.columns(2)
+        with col1:
+            new_city = st.text_input("城市名", key="rule_city")
+            new_unit_social = st.number_input("单位社保比例", min_value=0.0, max_value=1.0, value=0.16, step=0.001, key="rule_us")
+            new_personal_social = st.number_input("个人社保比例", min_value=0.0, max_value=1.0, value=0.08, step=0.001, key="rule_ps")
+        with col2:
+            new_unit_fund = st.number_input("单位公积金比例", min_value=0.0, max_value=1.0, value=0.12, step=0.001, key="rule_uf")
+            new_personal_fund = st.number_input("个人公积金比例", min_value=0.0, max_value=1.0, value=0.12, step=0.001, key="rule_pf")
+            new_source = st.text_input("来源引用", key="rule_source", placeholder="如：XX文件〔2024〕X号")
+        if st.button("添加规则") and new_city:
+            rules.append({
+                'id': str(uuid.uuid4())[:8],
+                'city': new_city,
+                'unit_social': new_unit_social,
+                'personal_social': new_personal_social,
+                'unit_fund': new_unit_fund,
+                'personal_fund': new_personal_fund,
+                'social_min': 0,
+                'social_max': 999999,
+                'fund_min': 0,
+                'fund_max': 999999,
+                'source_quote': new_source or '手动添加'
+            })
+            save_rules(rules)
+            st.success("规则已添加")
+            st.rerun()
+    
+    # ===== 模板管理（侧边栏） =====
+    with st.sidebar.expander("📄 模板管理"):
+        templates = load_templates()
+        if templates:
+            st.dataframe(pd.DataFrame(templates))
+        else:
+            st.info("暂无模板")
+        
+        st.markdown("**添加模板**")
+        t_province = st.text_input("省份", key="t_prov", placeholder="如：湖北")
+        t_city = st.text_input("城市", key="t_city", placeholder="如：武汉市")
+        t_district = st.text_input("区县", key="t_dist", placeholder="如：武昌区")
+        t_report_type = st.selectbox("报表类型", ["增值税", "社保", "公积金", "企业所得税", "个人所得税"], key="t_type")
+        t_name = st.text_input("模板名称", key="t_name", placeholder="如：武汉市个人所得税申报表")
+        t_version = st.text_input("版本号", key="t_ver", placeholder="v2024.1")
+        t_fields = st.text_input("必填字段（逗号分隔）", key="t_fields", placeholder="纳税人识别号,公司名称,收入额")
+        if st.button("添加模板") and t_name and t_province and t_city and t_report_type:
+            save_template({
+                'id': str(uuid.uuid4())[:8],
+                'province': t_province,
+                'city': t_city,
+                'district': t_district,
+                'report_type': t_report_type,
+                'template_name': t_name,
+                'template_version': t_version or 'v1.0',
+                'source_url': '',
+                'source_authority': '',
+                'publish_date': datetime.now().strftime('%Y-%m-%d'),
+                'required_fields': t_fields,
+                'status': 'active'
+            })
+            st.success("模板已添加")
+            st.rerun()
 
 # ===== 主体 =====
 companies = load_companies()
@@ -294,7 +362,6 @@ if not companies:
     st.info("👈 请先在侧边栏上传包含公司/城市数据的Excel")
     st.stop()
 
-# 获取所有省份
 all_provinces = sorted(set(c['province'] for c in companies if c['province']))
 
 col1, col2, col3 = st.columns(3)
@@ -312,10 +379,8 @@ with col3:
     report_type = st.selectbox("报表类型", ["", "增值税", "社保", "公积金", "企业所得税", "个人所得税"])
     period_type = st.selectbox("统计口径", ["月度（12月单月）", "累计（1-12月）"])
 
-# ===== 获取选中的公司对象 =====
 selected_companies = [c for c in company_list if c['company_name'] in selected_company_names]
 
-# ===== 匹配模板 =====
 if selected_companies and report_type:
     st.markdown("---")
     st.subheader("🔍 匹配结果")
@@ -324,7 +389,6 @@ if selected_companies and report_type:
     rules = load_rules()
     rules_dict = {r['city']: r for r in rules}
     
-    # 匹配模板
     matched = None
     for t in templates:
         if t['province'] == province and t['city'] == city and t['district'] == district and t['report_type'] == report_type:
@@ -367,7 +431,6 @@ if selected_companies and report_type:
             'source_url': '#'
         }
     
-    # 数据校验
     st.subheader("📋 数据校验")
     missing_rules = []
     for comp in selected_companies:
@@ -375,10 +438,10 @@ if selected_companies and report_type:
             missing_rules.append(comp['city'])
     if missing_rules:
         st.warning(f"⚠️ 以下城市缺少规则，将使用默认比例计算：{', '.join(set(missing_rules))}")
+        st.info("💡 如需添加规则，请在侧边栏「⚖️ 规则管理」中添加")
     else:
         st.success("✅ 所有城市已配置规则")
     
-    # ===== 生成按钮 =====
     reviewed = st.checkbox("✅ 我已人工复核确认数据无误", value=False)
     
     if st.button("📥 生成待复核版Excel", disabled=not reviewed):
@@ -388,30 +451,22 @@ if selected_companies and report_type:
         
         for comp in selected_companies:
             try:
-                # 获取该城市规则
                 rule = rules_dict.get(comp['city'])
                 fields = matched['required_fields'].split(',')
                 
-                # 构建数据（优先从导入数据读取，否则用示例）
                 if 'imported_df' in st.session_state and st.session_state['imported_df'] is not None:
                     df_data = st.session_state['imported_df']
-                    # 尝试匹配公司
-                    company_data = df_data[df_data.apply(lambda row: comp['company_name'] in str(row.values), axis=1)]
-                    if not company_data.empty:
-                        first_row = company_data.iloc[0]
-                        row_data = []
-                        for f in fields:
-                            matched_col = None
-                            for col in df_data.columns:
-                                if f in str(col) or str(col) in f:
-                                    matched_col = col
-                                    break
-                            if matched_col:
-                                row_data.append(first_row[matched_col])
-                            else:
-                                row_data.append('')
-                    else:
-                        row_data = [comp.get('tax_id', ''), comp['company_name'], '100,000.00', '13,000.00', '0.00']
+                    row_data = []
+                    for f in fields:
+                        matched_col = None
+                        for col in df_data.columns:
+                            if f in str(col) or str(col) in f:
+                                matched_col = col
+                                break
+                        if matched_col:
+                            row_data.append(df_data.iloc[0][matched_col])
+                        else:
+                            row_data.append('')
                 else:
                     sample_data = {
                         '纳税人识别号': comp.get('tax_id', ''),
@@ -428,14 +483,12 @@ if selected_companies and report_type:
                     }
                     row_data = [sample_data.get(f, '') for f in fields]
                 
-                # 创建Excel
                 wb = Workbook()
                 ws = wb.active
                 ws.title = "申报表"
                 ws.append(fields)
                 ws.append(row_data)
                 
-                # 水印
                 ws.insert_rows(1)
                 ws['A1'] = f'【系统生成 - 待复核版】统计口径：{period_type}'
                 ws['A1'].font = Font(color='FF0000', bold=True, size=14)
@@ -452,7 +505,6 @@ if selected_companies and report_type:
                 ws['A3'].font = Font(color='666666', size=10)
                 ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(fields))
                 
-                # 审计日志
                 audit = wb.create_sheet("审计日志")
                 audit.append(['操作时间', '操作类型', '操作人', '详情'])
                 audit.append([datetime.now().isoformat(), 'GENERATED', '系统', f'公司:{comp["company_name"]}, 模板:{matched["template_name"]}'])
@@ -465,7 +517,6 @@ if selected_companies and report_type:
                 generated_files.append((fname, output.getvalue()))
                 summary.append({'公司': comp['company_name'], '城市': comp['city'], '模板': matched['template_name'], '状态': '待复核'})
                 
-                # 保存历史
                 save_export({
                     'id': str(uuid.uuid4())[:8],
                     'company_id': comp['id'],
@@ -512,7 +563,6 @@ with st.expander("📋 导出历史记录"):
         df_hist = pd.DataFrame(history)
         st.dataframe(df_hist[['company_name', 'city', 'report_type', 'period_type', 'generated_at', 'review_status']])
         
-        # 复核功能
         pending = [h for h in history if h['review_status'] == 'pending']
         if pending:
             st.subheader("✅ 复核待处理报表")
