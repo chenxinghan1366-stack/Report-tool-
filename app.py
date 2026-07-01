@@ -141,15 +141,6 @@ def smart_column_mapping(df, required_cols, user_mapping=None):
                 mapping[std_name] = None
         return mapping
 
-# ===== 从Excel自动导入公司 =====
-def import_companies_from_excel(df, city_col, company_col):
-    companies = df[[company_col, city_col]].drop_duplicates()
-    companies = companies.rename(columns={company_col: 'company_name', city_col: 'city'})
-    companies['province'] = companies['city']
-    companies['district'] = '市区'
-    companies['id'] = [str(uuid.uuid4())[:8] for _ in range(len(companies))]
-    return companies.to_dict('records')
-
 # ---------- 初始化 ----------
 init_db()
 if not load_table('companies'):
@@ -197,11 +188,6 @@ with tab1:
     rules_data = load_table('rules')
     custom_templates = load_table('custom_templates')
     
-    if companies_data:
-        st.info(f"当前共有 {len(companies_data)} 家公司可选用")
-    else:
-        st.warning("请先上传数据并导入公司，或在「数据管理」中手动添加")
-    
     st.subheader("📤 1. 上传数据（自动识别公司、城市、员工）")
     st.caption("上传Excel后，系统自动提取公司列表并导入，无需手动添加")
     uploaded = st.file_uploader("选择文件（.xlsx, .xls, .csv, .txt）", type=["xlsx", "xls", "csv", "txt"])
@@ -210,7 +196,6 @@ with tab1:
     df_std = None
     sheets = []
     selected_sheet = None
-    auto_imported = False
     
     if uploaded:
         try:
@@ -255,60 +240,13 @@ with tab1:
                     st.success(f"成功提取数据，共 {len(df_raw)} 行")
                     st.dataframe(df_raw.head(5))
                     
-                    # ===== 核心：自动导入公司（增加手动选择） =====
-                    st.subheader("🏢 2. 自动导入公司列表")
-                    
-                    # 让用户手动选择公司列和城市列
-                    columns = list(df_raw.columns)
-                    company_col = st.selectbox("请选择公司名称列", [''] + columns, key="company_col_select")
-                    city_col = st.selectbox("请选择所属城市列", [''] + columns, key="city_col_select")
-                    
-                    # 如果没有手动选择，尝试自动检测
-                    if not company_col:
-                        for col in columns:
-                            if col == '公司名称' or col == '公司名' or col == '企业名称':
-                                company_col = col
-                                break
-                        if not company_col:
-                            for col in columns:
-                                if '公司' in col and not '总费用' in col and not '合计' in col:
-                                    company_col = col
-                                    break
-                    if not city_col:
-                        for col in columns:
-                            if col == '所属城市' or col == '城市' or col == '市':
-                                city_col = col
-                                break
-                        if not city_col:
-                            for col in columns:
-                                if '城市' in col or '市' in col:
-                                    city_col = col
-                                    break
-                    
-                    if company_col and city_col:
-                        st.info(f"当前使用：公司列 = {company_col}，城市列 = {city_col}")
-                        preview_companies = df_raw[[company_col, city_col]].drop_duplicates()
-                        st.write("将导入以下公司：")
-                        st.dataframe(preview_companies)
-                        
-                        if st.button("✅ 一键导入公司（覆盖当前列表）"):
-                            new_companies = import_companies_from_excel(df_raw, city_col, company_col)
-                            save_table('companies', new_companies)
-                            st.success(f"成功导入 {len(new_companies)} 家公司！")
-                            auto_imported = True
-                            st.rerun()
-                    else:
-                        st.warning("未选择公司列或城市列，请从下拉框中手动选择。")
-                    
                     # ===== 列名映射 =====
-                    st.subheader("🔍 3. 列名映射（用于生成报表）")
+                    st.subheader("🔍 2. 列名映射（用于生成报表）")
                     required_cols = ['公司', '城市', '姓名', '工资基数']
                     col_mapping = smart_column_mapping(df_raw, required_cols)
                     
-                    mapping_ok = True
                     for std_name, actual_col in col_mapping.items():
                         if actual_col is None or actual_col == '':
-                            mapping_ok = False
                             options = [''] + list(df_raw.columns)
                             selected = st.selectbox(f"请选择 '{std_name}' 对应的列", options, key=f"map_{std_name}_{uploaded.name}")
                             if selected:
@@ -322,6 +260,7 @@ with tab1:
                                 std_data[std_name] = df_raw[actual_col]
                         df_std = pd.DataFrame(std_data)
                         
+                        # 处理姓名
                         if '姓名' not in df_std.columns or df_std['姓名'].isnull().all():
                             for col in df_raw.columns:
                                 if '编号' in col or 'ID' in col or '员工' in col:
@@ -330,6 +269,7 @@ with tab1:
                         if '姓名' not in df_std.columns or df_std['姓名'].isnull().all():
                             df_std['姓名'] = [f"员工{i+1}" for i in range(len(df_std))]
                         
+                        # 处理工资基数
                         if '工资基数' in df_std.columns:
                             df_std['工资基数'] = pd.to_numeric(df_std['工资基数'], errors='coerce')
                             df_std = df_std.dropna(subset=['工资基数'])
@@ -343,15 +283,17 @@ with tab1:
         except Exception as e:
             st.error(f"❌ 读取文件失败：{str(e)}")
     
-    # ===== 选择公司和生成报表 =====
-    st.subheader("📤 4. 选择公司并生成报表")
-    companies_data = load_table('companies')
+    # ===== 选择公司和生成报表（直接从数据中提取公司列表） =====
+    st.subheader("📤 3. 选择公司并生成报表")
     
-    if not companies_data:
-        st.warning("请先上传数据并导入公司，或手动添加")
-    else:
-        company_options = [f"{c['company_name']} ({c['city']})" for c in companies_data]
-        selected_indices = st.multiselect("选择公司（可多选）", range(len(company_options)), format_func=lambda x: company_options[x])
+    if df_std is not None and not df_std.empty:
+        # 从数据中提取所有公司及对应城市
+        company_city = df_std[['公司', '城市']].drop_duplicates()
+        company_city['label'] = company_city['公司'] + ' (' + company_city['城市'] + ')'
+        company_options = company_city['label'].tolist()
+        company_map = {row['label']: (row['公司'], row['城市']) for _, row in company_city.iterrows()}
+        
+        selected_labels = st.multiselect("选择公司（可多选）", company_options)
         
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -369,9 +311,7 @@ with tab1:
         selected_template_name = st.selectbox("选择模板", template_options)
         
         if st.button("🚀 生成报表", type="primary"):
-            if df_std is None or df_std.empty:
-                st.error("请先上传并准备数据（步骤1-3）")
-            elif not selected_indices:
+            if not selected_labels:
                 st.error("请至少选择一个公司")
             else:
                 custom_template = None
@@ -386,15 +326,15 @@ with tab1:
                 summary_list = []
                 errors = []
                 
-                for idx in selected_indices:
-                    company_info = companies_data[idx]
-                    company_name = company_info['company_name']
-                    city = company_info['city']
+                for label in selected_labels:
+                    company_name, city = company_map[label]
+                    # 筛选该公司的数据
                     df_wage = df_std[df_std['公司'] == company_name].copy()
                     if df_wage.empty:
                         errors.append(f"{company_name}: 未找到员工数据")
                         continue
                     
+                    # 匹配规则
                     matched = rule_df[(rule_df['city'] == city) & (rule_df['report_type'] == report_type)]
                     if matched.empty:
                         errors.append(f"{company_name}: 未找到 {city} 的规则")
@@ -538,6 +478,8 @@ with tab1:
                     else:
                         fname, data, mime = generated_files[0]
                         st.download_button(f"📥 下载 {fname}", data=BytesIO(data), file_name=fname, mime=mime)
+    else:
+        st.info("请先上传数据并完成列映射，系统将自动识别公司列表。")
 
 # ==================== 报表历史与复核 ====================
 with tab2:
