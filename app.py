@@ -87,7 +87,7 @@ def get_audit_logs():
     conn.close()
     return df.to_dict('records') if not df.empty else []
 
-# ===== 规则导入 =====
+# ===== 从“基础配置表”导入规则（自动） =====
 def import_rules_from_excel(xls):
     rule_sheet = None
     for sheet in ["基础配置表", "规则", "城市规则", "配置表"]:
@@ -183,8 +183,8 @@ if not load_table('rules'):
 
 # ---------- Streamlit 页面 ----------
 st.set_page_config(page_title="本地社保报表系统", layout="wide")
-st.title("📋 本地社保公积金报表系统（适配汇总数据版）")
-st.markdown("🔒 **支持按公司名称（分公司）生成报表**")
+st.title("📋 社保公积金报表系统（自适配版）")
+st.markdown("🔒 **上传Excel，手动映射列，自动匹配规则，一键生成报表**")
 
 # 仪表盘
 history = get_export_history()
@@ -205,241 +205,201 @@ tab1, tab2, tab3 = st.tabs(["📊 生成报表", "📋 报表历史与复核", "
 
 # ==================== 生成报表 ====================
 with tab1:
-    companies_data = load_table('companies')
-    rules_data = load_table('rules')
-
-    st.subheader("📤 1. 上传数据（自动导入规则）")
-    st.caption("上传Excel后，系统自动从「基础配置表」导入规则，从您选择的Sheet读取汇总数据")
+    st.subheader("📤 1. 上传Excel文件")
     uploaded = st.file_uploader("选择文件（.xlsx, .xls）", type=["xlsx", "xls"])
-
-    df_data = None
-    selected_sheet = None
+    
     if uploaded:
         try:
             xls = pd.ExcelFile(uploaded)
             sheets = xls.sheet_names
-            selected_sheet = st.selectbox("选择Sheet", sheets, index=0)
-
-            with st.spinner("正在自动识别并导入城市规则..."):
+            selected_sheet = st.selectbox("选择数据Sheet", sheets, index=0)
+            
+            # 自动导入规则（从“基础配置表”）
+            with st.spinner("正在导入城市规则..."):
                 count, error_msg = import_rules_from_excel(xls)
                 if count > 0:
-                    st.success(f"✅ 成功从「基础配置表」导入 {count} 个城市的规则！")
-                    rules_data = load_table('rules')
+                    st.success(f"✅ 成功导入 {count} 个城市的规则！")
                 else:
-                    st.warning(f"⚠️ 规则导入：{error_msg}")
-
-            if selected_sheet:
-                df_data = pd.read_excel(uploaded, sheet_name=selected_sheet)
-                if df_data is not None:
-                    st.info(f"📊 读取到 {len(df_data)} 行，{len(df_data.columns)} 列")
-                    st.dataframe(df_data.head(5))
-
-                    header_row = 0
-                    for i, row in df_data.iterrows():
-                        row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
-                        if any(key in row_text for key in ['所属城市', '城市', '公司', '缴费基数', '参保人数']):
-                            header_row = i
-                            break
-                    if header_row == 0:
-                        header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_data)-1, value=0, step=1)
-                    else:
-                        st.info(f"自动检测到表头行：第 {header_row} 行")
-                        override = st.checkbox("手动调整表头行号")
-                        if override:
-                            header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_data)-1, value=header_row, step=1)
-
-                    if header_row < len(df_data):
-                        new_header = df_data.iloc[header_row]
-                        new_header = [str(h) for h in new_header]
-                        df_data = df_data[header_row+1:]
-                        df_data.columns = new_header
-                        df_data = df_data.reset_index(drop=True)
-                        df_data = df_data.dropna(how='all')
-                        st.success(f"成功提取数据，共 {len(df_data)} 行")
-                        st.dataframe(df_data.head(5))
-
-                        # 显示实际列名，帮助调试
-                        st.write("数据列名：", list(df_data.columns))
-
-        except Exception as e:
-            st.error(f"❌ 读取文件失败：{str(e)}")
-
-    # ===== 选择公司并生成报表 =====
-    st.subheader("📤 2. 选择公司（分公司）并生成报表")
-
-    if df_data is not None and not df_data.empty:
-        # 提取城市列和分公司列
-        city_col = None
-        company_col = None
-        for col in df_data.columns:
-            col_str = str(col)
-            if '所属城市' in col_str:
-                city_col = col
-            elif '分公司' in col_str or '公司' in col_str:
-                company_col = col
-        
-        if company_col is None:
-            company_col = city_col
-            st.info("未找到「分公司」列，将使用「城市」作为公司名称")
-        
-        if city_col is None:
-            st.error("未找到城市列，请确保数据包含「所属城市」列")
-        else:
-            # 获取唯一的分公司-城市组合
-            if company_col and company_col != city_col:
-                df_company = df_data[[company_col, city_col]].drop_duplicates()
-                df_company['display'] = df_company[company_col] + ' (' + df_company[city_col] + ')'
-                options = df_company['display'].tolist()
-                company_map = {row['display']: (row[company_col], row[city_col]) for _, row in df_company.iterrows()}
-            else:
-                cities = df_data[city_col].unique().tolist()
-                options = [c + ' (城市)' for c in cities]
-                company_map = {c + ' (城市)': (c, c) for c in cities}
-
-            selected_options = st.multiselect("选择公司（可多选）", options)
-
-            report_type = st.selectbox("报表类型", ["月度申报", "年度汇算"])
-            year = st.selectbox("年份", [2025,2024,2023], index=0)
-            month = None
-            if report_type == "月度申报":
-                month = st.selectbox("月份", list(range(1,13)), index=11)
-
-            export_format = st.radio("导出格式", ["Excel (.xlsx)", "CSV (.csv)"], horizontal=True)
-
-            if st.button("🚀 生成报表", type="primary"):
-                if not selected_options:
-                    st.error("请至少选择一个公司")
+                    st.warning(f"⚠️ 规则导入：{error_msg}，但您仍可继续生成报表（需手动输入比例）。")
+            
+            # 读取数据
+            df_raw = pd.read_excel(uploaded, sheet_name=selected_sheet, header=None)
+            # 检测表头行（查找包含“城市”或“分公司”的行）
+            header_row = 0
+            for i, row in df_raw.iterrows():
+                row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
+                if any(key in row_text for key in ['城市', '公司', '参保', '缴费', '社保', '公积金']):
+                    header_row = i
+                    break
+            if header_row > 0:
+                st.info(f"自动检测到表头行：第 {header_row} 行")
+                # 让用户确认或修改
+                adjust = st.checkbox("手动调整表头行号")
+                if adjust:
+                    header_row = st.number_input("表头行号（从0开始）", min_value=0, max_value=len(df_raw)-1, value=header_row, step=1)
+            
+            # 提取数据
+            if header_row < len(df_raw):
+                new_header = df_raw.iloc[header_row]
+                new_header = [str(h).strip() for h in new_header]
+                df_data = df_raw.iloc[header_row+1:].copy()
+                df_data.columns = new_header
+                df_data = df_data.reset_index(drop=True)
+                df_data = df_data.dropna(how='all')
+                st.success(f"成功提取数据，共 {len(df_data)} 行")
+                st.dataframe(df_data.head(5))
+                
+                # ===== 步骤2：手动列映射 =====
+                st.subheader("📤 2. 映射列名（请为每个字段选择对应的列）")
+                cols = df_data.columns.tolist()
+                
+                col_company = st.selectbox("公司名称（分公司）", [''] + cols, key='map_company')
+                col_city = st.selectbox("所属城市", [''] + cols, key='map_city')
+                col_people = st.selectbox("参保人数", [''] + cols, key='map_people')
+                col_social_unit = st.selectbox("社保单位合计", [''] + cols, key='map_social_unit')
+                col_social_personal = st.selectbox("社保个人合计", [''] + cols, key='map_social_personal')
+                col_fund_unit = st.selectbox("公积金单位合计", [''] + cols, key='map_fund_unit')
+                col_fund_personal = st.selectbox("公积金个人合计", [''] + cols, key='map_fund_personal')
+                col_total = st.selectbox("总费用（可选，若无可自动计算）", [''] + cols, key='map_total')
+                
+                # 检查是否映射了必要字段
+                required_mapped = col_company and col_city and col_social_unit and col_social_personal
+                if not required_mapped:
+                    st.warning("请至少映射：公司名称、城市、社保单位合计、社保个人合计。")
                 else:
-                    generated_files = []
-                    summary_list = []
-                    errors = []
-
-                    # ===== 加强列名查找 =====
-                    def find_col(possible_names):
-                        for name in possible_names:
-                            # 先精确匹配
-                            for col in df_data.columns:
-                                if col == name:
-                                    return col
-                            # 再忽略大小写和空格匹配
-                            name_clean = name.replace(' ', '').lower()
-                            for col in df_data.columns:
-                                col_clean = str(col).replace(' ', '').lower()
-                                if name_clean == col_clean or name_clean in col_clean:
-                                    return col
-                            # 最后用包含匹配
-                            for col in df_data.columns:
-                                if name.lower() in str(col).lower():
-                                    return col
-                        return None
-
-                    # 查找各列
-                    col_people = find_col(['参保人数'])
-                    col_social_unit = find_col(['社保单位合计', '社保合计-单位部分', '社保单位'])
-                    col_social_personal = find_col(['社保个人合计', '社保合计-个人部分', '社保个人'])
-                    col_fund_unit = find_col(['公积金单位合计', '公积金-单位部分', '公积金单位'])
-                    col_fund_personal = find_col(['公积金个人合计', '公积金-个人部分', '公积金个人'])
-                    col_total = find_col(['社保+公积金合计-总金额', '社保+公积金总金额', '总金额'])
-
-                    # 如果还是找不到社保单位合计，尝试用“社保总金额”拆分（但不准确），这里直接报错
-                    if col_social_unit is None and col_social_personal is None:
-                        st.error(f"未找到社保金额列。当前列名：{list(df_data.columns)}")
-                        st.stop()
-
-                    rule_df = pd.DataFrame(rules_data)
-                    for selected in selected_options:
-                        company_name, city = company_map[selected]
-                        city_data = df_data[df_data[city_col] == city]
-                        if company_col and company_col != city_col:
-                            city_data = city_data[city_data[company_col] == company_name]
-                        
-                        if city_data.empty:
-                            errors.append(f"{company_name}: 无数据")
-                            continue
-
-                        total_people = city_data[col_people].sum() if col_people else len(city_data)
-                        total_social_unit = city_data[col_social_unit].sum() if col_social_unit else 0
-                        total_social_personal = city_data[col_social_personal].sum() if col_social_personal else 0
-                        total_fund_unit = city_data[col_fund_unit].sum() if col_fund_unit else 0
-                        total_fund_personal = city_data[col_fund_personal].sum() if col_fund_personal else 0
-                        total_cost = city_data[col_total].sum() if col_total else (total_social_unit + total_social_personal + total_fund_unit + total_fund_personal)
-
-                        matched = rule_df[(rule_df['city'] == city) & (rule_df['report_type'] == '月度申报')]
-                        source_quote = matched.iloc[0]['source_quote'] if not matched.empty else '未匹配规则'
-
-                        wb = Workbook()
-                        ws = wb.active
-                        ws.title = "汇总报表"
-                        ws.append(['指标', '金额'])
-                        ws.append(['公司名称', company_name])
-                        ws.append(['所属城市', city])
-                        ws.append(['参保人数', int(total_people)])
-                        ws.append(['社保单位合计', round(total_social_unit, 2)])
-                        ws.append(['社保个人合计', round(total_social_personal, 2)])
-                        ws.append(['公积金单位', round(total_fund_unit, 2)])
-                        ws.append(['公积金个人', round(total_fund_personal, 2)])
-                        ws.append(['总费用', round(total_cost, 2)])
-
-                        audit = wb.create_sheet("AuditTrail")
-                        audit.append(["时间", "操作", "详情"])
-                        audit.append([datetime.now().isoformat(), "GENERATED", f"公司:{company_name}, 城市:{city}, 规则来源:{source_quote}"])
-
-                        ws.insert_rows(1)
-                        ws['A1'] = '⚠️ 待复核版'
-                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
-
-                        output = BytesIO()
-                        wb.save(output)
-                        output.seek(0)
-                        fname = f"{company_name}_{year}{month or ''}.xlsx"
-                        generated_files.append((fname, output.getvalue()))
-
-                        export_id = str(uuid.uuid4())[:8]
-                        record = {
-                            "id": export_id,
-                            "company": company_name,
-                            "city": city,
-                            "report_type": report_type,
-                            "year": year,
-                            "month": month,
-                            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "status": "待复核",
-                            "source_quote": source_quote,
-                            "total_people": int(total_people),
-                            "total_cost": round(total_cost, 2),
-                            "reviewer": "",
-                            "reviewed_at": "",
-                            "review_comment": ""
-                        }
-                        insert_or_update_export(record)
-                        insert_audit_log({
-                            "id": str(uuid.uuid4())[:8],
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "action": "生成报表",
-                            "detail": f"公司:{company_name}, 城市:{city}, 人数:{total_people}, 总成本:{round(total_cost,2)}",
-                            "report_id": export_id
-                        })
-                        summary_list.append({"公司": company_name, "城市": city, "人数": int(total_people), "总成本": round(total_cost, 2)})
-
-                    if errors:
-                        for err in errors:
-                            st.warning(err)
-                    if generated_files:
-                        st.success(f"✅ 成功生成 {len(generated_files)} 份报表")
-                        st.dataframe(pd.DataFrame(summary_list))
-                        if len(generated_files) > 1:
-                            zip_buffer = BytesIO()
-                            with zipfile.ZipFile(zip_buffer, 'w') as zf:
-                                for fname, data in generated_files:
-                                    zf.writestr(fname, data)
-                            zip_buffer.seek(0)
-                            st.download_button("📦 下载全部（ZIP）", data=zip_buffer, file_name=f"报表_{year}{month or ''}.zip", mime="application/zip")
+                    st.success("✅ 必要字段已映射，可继续生成报表。")
+                    
+                    # 步骤3：选择生成参数
+                    st.subheader("📤 3. 选择报表参数")
+                    # 提取公司列表
+                    df_company = df_data[[col_company, col_city]].drop_duplicates()
+                    df_company['display'] = df_company[col_company] + ' (' + df_company[col_city] + ')'
+                    options = df_company['display'].tolist()
+                    company_map = {row['display']: (row[col_company], row[col_city]) for _, row in df_company.iterrows()}
+                    
+                    selected_options = st.multiselect("选择公司（可多选）", options)
+                    
+                    report_type = st.selectbox("报表类型", ["月度申报", "年度汇算"])
+                    year = st.selectbox("年份", [2025,2024,2023], index=0)
+                    month = None
+                    if report_type == "月度申报":
+                        month = st.selectbox("月份", list(range(1,13)), index=11)
+                    
+                    export_format = st.radio("导出格式", ["Excel (.xlsx)", "CSV (.csv)"], horizontal=True)
+                    
+                    if st.button("🚀 生成报表", type="primary"):
+                        if not selected_options:
+                            st.error("请至少选择一个公司")
                         else:
-                            fname, data = generated_files[0]
-                            st.download_button(f"📥 下载 {fname}", data=BytesIO(data), file_name=fname)
-
+                            # 获取规则
+                            rule_df = pd.DataFrame(load_table('rules'))
+                            generated_files = []
+                            summary_list = []
+                            errors = []
+                            
+                            for selected in selected_options:
+                                company_name, city = company_map[selected]
+                                # 筛选数据
+                                city_data = df_data[df_data[col_city] == city]
+                                if col_company:
+                                    city_data = city_data[city_data[col_company] == company_name]
+                                if city_data.empty:
+                                    errors.append(f"{company_name}: 无数据")
+                                    continue
+                                
+                                # 汇总
+                                total_people = city_data[col_people].sum() if col_people else len(city_data)
+                                total_social_unit = city_data[col_social_unit].sum()
+                                total_social_personal = city_data[col_social_personal].sum()
+                                total_fund_unit = city_data[col_fund_unit].sum() if col_fund_unit else 0
+                                total_fund_personal = city_data[col_fund_personal].sum() if col_fund_personal else 0
+                                if col_total:
+                                    total_cost = city_data[col_total].sum()
+                                else:
+                                    total_cost = total_social_unit + total_social_personal + total_fund_unit + total_fund_personal
+                                
+                                # 匹配规则来源
+                                matched = rule_df[(rule_df['city'] == city) & (rule_df['report_type'] == '月度申报')]
+                                source_quote = matched.iloc[0]['source_quote'] if not matched.empty else '未匹配规则'
+                                
+                                # 生成Excel
+                                wb = Workbook()
+                                ws = wb.active
+                                ws.title = "汇总报表"
+                                ws.append(['指标', '金额'])
+                                ws.append(['公司名称', company_name])
+                                ws.append(['所属城市', city])
+                                ws.append(['参保人数', int(total_people)])
+                                ws.append(['社保单位合计', round(total_social_unit, 2)])
+                                ws.append(['社保个人合计', round(total_social_personal, 2)])
+                                ws.append(['公积金单位', round(total_fund_unit, 2)])
+                                ws.append(['公积金个人', round(total_fund_personal, 2)])
+                                ws.append(['总费用', round(total_cost, 2)])
+                                
+                                audit = wb.create_sheet("AuditTrail")
+                                audit.append(["时间", "操作", "详情"])
+                                audit.append([datetime.now().isoformat(), "GENERATED", f"公司:{company_name}, 城市:{city}, 规则来源:{source_quote}"])
+                                
+                                ws.insert_rows(1)
+                                ws['A1'] = '⚠️ 待复核版'
+                                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
+                                
+                                output = BytesIO()
+                                wb.save(output)
+                                output.seek(0)
+                                fname = f"{company_name}_{year}{month or ''}.xlsx"
+                                generated_files.append((fname, output.getvalue()))
+                                
+                                # 保存历史
+                                export_id = str(uuid.uuid4())[:8]
+                                record = {
+                                    "id": export_id,
+                                    "company": company_name,
+                                    "city": city,
+                                    "report_type": report_type,
+                                    "year": year,
+                                    "month": month,
+                                    "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "status": "待复核",
+                                    "source_quote": source_quote,
+                                    "total_people": int(total_people),
+                                    "total_cost": round(total_cost, 2),
+                                    "reviewer": "",
+                                    "reviewed_at": "",
+                                    "review_comment": ""
+                                }
+                                insert_or_update_export(record)
+                                insert_audit_log({
+                                    "id": str(uuid.uuid4())[:8],
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "action": "生成报表",
+                                    "detail": f"公司:{company_name}, 城市:{city}, 人数:{total_people}, 总成本:{round(total_cost,2)}",
+                                    "report_id": export_id
+                                })
+                                summary_list.append({"公司": company_name, "城市": city, "人数": int(total_people), "总成本": round(total_cost, 2)})
+                            
+                            if errors:
+                                for err in errors:
+                                    st.warning(err)
+                            if generated_files:
+                                st.success(f"✅ 成功生成 {len(generated_files)} 份报表")
+                                st.dataframe(pd.DataFrame(summary_list))
+                                if len(generated_files) > 1:
+                                    zip_buffer = BytesIO()
+                                    with zipfile.ZipFile(zip_buffer, 'w') as zf:
+                                        for fname, data in generated_files:
+                                            zf.writestr(fname, data)
+                                    zip_buffer.seek(0)
+                                    st.download_button("📦 下载全部（ZIP）", data=zip_buffer, file_name=f"报表_{year}{month or ''}.zip", mime="application/zip")
+                                else:
+                                    fname, data = generated_files[0]
+                                    st.download_button(f"📥 下载 {fname}", data=BytesIO(data), file_name=fname)
+            else:
+                st.error("表头行号无效，请检查数据。")
+        except Exception as e:
+            st.error(f"❌ 处理文件时出错：{str(e)}")
     else:
-        st.info("请先上传数据并完成表头识别。")
+        st.info("请上传Excel文件开始。")
 
 # ==================== 报表历史与复核 ====================
 with tab2:
