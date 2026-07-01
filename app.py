@@ -5,17 +5,34 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 from io import BytesIO
 import uuid
-import re
+
+# ========== 城市→省份 映射表 ==========
+CITY_TO_PROVINCE = {
+    '上海': '上海',
+    '北京': '北京',
+    '广州': '广东',
+    '深圳': '广东',
+    '杭州': '浙江',
+    '南京': '江苏',
+    '苏州': '江苏',
+    '成都': '四川',
+    '重庆': '重庆',
+    '武汉': '湖北',
+    '西安': '陕西',
+    '郑州': '河南',
+    '长沙': '湖南',
+    '青岛': '山东',
+    '宁波': '浙江',
+    '天津': '天津',
+}
 
 # ========== 初始化会话状态 ==========
 if 'companies' not in st.session_state:
-    st.session_state.companies = []  # 将从Excel自动填充
+    st.session_state.companies = []
 if 'export_history' not in st.session_state:
     st.session_state.export_history = []
 if 'imported_data' not in st.session_state:
     st.session_state.imported_data = None
-if 'uploaded_sheets' not in st.session_state:
-    st.session_state.uploaded_sheets = {}
 if 'all_cities' not in st.session_state:
     st.session_state.all_cities = set()
 
@@ -73,32 +90,55 @@ TEMPLATES = [
         'publish_date': '2024-02-01',
         'required_fields': '纳税人识别号,公司名称,销售额,进项税额,应纳税额'
     },
+    {
+        'id': 't005',
+        'province': '江苏',
+        'city': '南京市',
+        'district': '玄武区',
+        'report_type': '增值税',
+        'template_name': '江苏省增值税纳税申报表',
+        'template_version': 'v2024.1',
+        'source_url': 'https://jiangsu.chinatax.gov.cn/bsfw/2024/zzs.xlsx',
+        'source_authority': '国家税务总局江苏省税务局',
+        'publish_date': '2024-03-01',
+        'required_fields': '纳税人识别号,公司名称,销售额,进项税额,应纳税额'
+    },
+    {
+        'id': 't006',
+        'province': '浙江',
+        'city': '杭州市',
+        'district': '西湖区',
+        'report_type': '增值税',
+        'template_name': '浙江省增值税纳税申报表',
+        'template_version': 'v2024.1',
+        'source_url': 'https://zhejiang.chinatax.gov.cn/bsfw/2024/zzs.xlsx',
+        'source_authority': '国家税务总局浙江省税务局',
+        'publish_date': '2024-03-10',
+        'required_fields': '纳税人识别号,公司名称,销售额,进项税额,应纳税额'
+    },
 ]
 
-# ========== 解析上传的Excel，自动提取公司/城市 ==========
+# ========== 解析上传的Excel ==========
 def parse_uploaded_excel(file):
-    """解析上传的Excel，提取所有公司和城市信息"""
     xls = pd.ExcelFile(file)
     sheets = xls.sheet_names
     all_companies = []
     all_cities = set()
+    all_provinces = set()
     
-    # 遍历所有Sheet，尝试提取数据
     for sheet in sheets:
         try:
             df = pd.read_excel(file, sheet_name=sheet, header=None)
-            # 尝试识别表头行
             header_row = None
             for i, row in df.iterrows():
                 row_text = ' '.join([str(v) for v in row.values if pd.notna(v)])
-                if '所属城市' in row_text or '城市' in row_text or '公司' in row_text:
+                if '所属城市' in row_text or '城市' in row_text or '分公司' in row_text:
                     header_row = i
                     break
             if header_row is not None:
                 df = pd.read_excel(file, sheet_name=sheet, skiprows=header_row)
                 df.columns = [str(c).strip() for c in df.columns]
                 
-                # 查找关键列
                 city_col = None
                 company_col = None
                 district_col = None
@@ -112,16 +152,18 @@ def parse_uploaded_excel(file):
                         district_col = col
                 
                 if city_col and company_col:
-                    # 提取唯一的公司-城市-区县组合
                     for _, row in df.iterrows():
                         city = str(row[city_col]) if pd.notna(row[city_col]) else ''
                         company = str(row[company_col]) if pd.notna(row[company_col]) else ''
                         district = str(row[district_col]) if district_col and pd.notna(row[district_col]) else ''
                         if city and company:
                             all_cities.add(city)
+                            # 根据城市查找省份
+                            province = CITY_TO_PROVINCE.get(city, city)
+                            all_provinces.add(province)
                             all_companies.append({
                                 'company_name': company,
-                                'province': city,  # 省份与城市名相同（适用于直辖市/省城）
+                                'province': province,
                                 'city': city,
                                 'district': district,
                                 'tax_id': ''
@@ -138,34 +180,29 @@ def parse_uploaded_excel(file):
             seen.add(key)
             unique_companies.append(c)
     
-    return unique_companies, list(all_cities)
+    return unique_companies, list(all_cities), list(all_provinces)
 
 # ========== 页面 ==========
 st.set_page_config(page_title="官方模板匹配器", layout="wide")
 st.title("📋 官方模板匹配器（含自动识别与统计口径）")
 st.markdown("**上传Excel → 自动提取城市/公司 → 选择模板和统计口径 → 生成待复核版Excel**")
 
-# ===== 侧边栏：上传Excel =====
+# ===== 侧边栏 =====
 with st.sidebar:
     st.header("📤 上传数据Excel")
     st.markdown("上传包含公司/城市信息的Excel，系统自动提取所有地区")
     uploaded_file = st.file_uploader("选择Excel文件（.xlsx）", type=["xlsx"], key="main_upload")
     
     if uploaded_file:
-        # 解析并提取公司/城市
         with st.spinner("正在解析Excel并提取地区信息..."):
-            companies, cities = parse_uploaded_excel(uploaded_file)
+            companies, cities, provinces = parse_uploaded_excel(uploaded_file)
             if companies:
-                # 更新session_state
                 st.session_state.companies = companies
                 st.session_state.all_cities = set(cities)
-                st.success(f"成功提取 {len(companies)} 家公司，{len(cities)} 个城市")
-                # 同时存储数据用于填充模板
-                # 读取数据（用于报表填充）
+                st.success(f"成功提取 {len(companies)} 家公司，{len(cities)} 个城市，{len(provinces)} 个省份")
+                # 读取数据
                 try:
-                    # 尝试读取第一个数据Sheet
                     xls = pd.ExcelFile(uploaded_file)
-                    # 优先选择“月度明细数据表”
                     data_sheet = None
                     for s in xls.sheet_names:
                         if '明细' in s or '月度' in s or '数据' in s:
@@ -175,36 +212,32 @@ with st.sidebar:
                         df_data = pd.read_excel(uploaded_file, sheet_name=data_sheet)
                         st.session_state.imported_data = df_data
                         st.sidebar.success(f"成功读取Sheet「{data_sheet}」，共{len(df_data)}行")
-                    else:
-                        st.sidebar.warning("未找到数据Sheet，请手动选择")
                 except Exception as e:
                     st.sidebar.error(f"读取数据失败：{str(e)}")
             else:
-                st.sidebar.warning("未自动识别到公司列和城市列，请确认数据格式")
+                st.sidebar.warning("未自动识别到公司列和城市列")
     
-    # 显示当前公司列表
-    with st.sidebar.expander("🏢 当前公司列表（自动提取）"):
+    with st.sidebar.expander("🏢 当前公司列表"):
         if st.session_state.companies:
             st.dataframe(pd.DataFrame(st.session_state.companies))
             st.caption(f"共 {len(st.session_state.companies)} 家公司")
         else:
-            st.info("暂无公司数据，请上传Excel")
+            st.info("暂无数据")
 
-# ===== 主体：筛选 =====
+# ===== 主体 =====
 companies = st.session_state.companies
 if not companies:
     st.info("👈 请先在侧边栏上传包含公司/城市数据的Excel")
     st.stop()
 
-# 获取所有省份/城市/区县
-provinces = sorted(set(c['province'] for c in companies if c['province']))
-all_cities = sorted(set(c['city'] for c in companies if c['city']))
+# 获取所有省份（从公司数据中提取）
+all_provinces = sorted(set(c['province'] for c in companies if c['province']))
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    province = st.selectbox("省份", [""] + provinces)
+    province = st.selectbox("省份", [""] + all_provinces)
     # 根据省份过滤城市
-    cities = sorted(set(c['city'] for c in companies if c['province'] == province)) if province else all_cities
+    cities = sorted(set(c['city'] for c in companies if c['province'] == province)) if province else sorted(set(c['city'] for c in companies))
     city = st.selectbox("城市", [""] + cities)
 with col2:
     districts = sorted(set(c['district'] for c in companies if c['province'] == province and c['city'] == city)) if province and city else []
@@ -214,10 +247,8 @@ with col2:
     selected_company_name = st.selectbox("公司", [""] + company_names)
 with col3:
     report_type = st.selectbox("报表类型", ["", "增值税", "社保", "公积金", "企业所得税", "个人所得税"])
-    # 统计口径
     period_type = st.selectbox("统计口径", ["月度（12月单月）", "累计（1-12月）"])
 
-# 获取选中公司
 selected_company = None
 for c in company_list:
     if c['company_name'] == selected_company_name:
@@ -229,7 +260,6 @@ if selected_company and report_type:
     st.markdown("---")
     st.subheader("🔍 匹配结果")
 
-    # 匹配逻辑：区级→市级→省级
     matched = None
     for t in TEMPLATES:
         if t['province'] == province and t['city'] == city and t['district'] == district and t['report_type'] == report_type:
@@ -271,27 +301,22 @@ if selected_company and report_type:
             'source_url': '#'
         }
 
-    # ===== 展示导入的数据 =====
     if st.session_state.imported_data is not None:
         st.subheader("📊 已导入数据预览")
         st.dataframe(st.session_state.imported_data.head(5))
         st.caption(f"共 {len(st.session_state.imported_data)} 行数据，统计口径：{period_type}")
 
-    # ===== 复核复选框 =====
     reviewed = st.checkbox("✅ 我已人工复核确认数据无误", value=False)
 
     if st.button("📥 生成待复核版Excel", disabled=not reviewed):
-        # 生成Excel
         wb = Workbook()
         ws = wb.active
         ws.title = "申报表"
 
-        # 填充数据
         fields = matched['required_fields'].split(',')
         ws.append(fields)
 
         if st.session_state.imported_data is not None and not st.session_state.imported_data.empty:
-            # 使用导入数据的第一行填充
             first_row = st.session_state.imported_data.iloc[0]
             row_data = []
             for f in fields:
@@ -311,7 +336,6 @@ if selected_company and report_type:
                         row_data.append('')
             ws.append(row_data)
         else:
-            # 示例数据
             sample_data = {
                 '纳税人识别号': selected_company.get('tax_id', ''),
                 '公司名称': selected_company['company_name'],
@@ -327,26 +351,22 @@ if selected_company and report_type:
             row_data = [sample_data.get(f, '') for f in fields]
             ws.append(row_data)
 
-        # 水印
         ws.insert_rows(1)
         ws['A1'] = f'【系统生成 - 待复核版】统计口径：{period_type}'
         ws['A1'].font = Font(color='FF0000', bold=True, size=14)
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(fields))
         ws['A1'].alignment = Alignment(horizontal='center')
 
-        # 模板版本
         ws.insert_rows(2)
         ws['A2'] = f'模板名称：{matched["template_name"]}  版本：{matched["template_version"]}  统计口径：{period_type}'
         ws['A2'].font = Font(color='666666', size=10)
         ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(fields))
 
-        # 来源信息
         ws.insert_rows(3)
         ws['A3'] = f'来源：{matched["source_authority"]}  发布日期：{matched["publish_date"]}'
         ws['A3'].font = Font(color='666666', size=10)
         ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(fields))
 
-        # 审计日志
         audit = wb.create_sheet("审计日志")
         audit.append(['操作时间', '操作类型', '操作人', '详情'])
         audit.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'GENERATED', '系统', f'公司:{selected_company["company_name"]}, 模板:{matched["template_name"]}, 口径:{period_type}'])
@@ -355,7 +375,6 @@ if selected_company and report_type:
         wb.save(output)
         output.seek(0)
 
-        # 记录历史
         export_record = {
             'id': str(uuid.uuid4())[:8],
             'company': selected_company['company_name'],
@@ -381,13 +400,12 @@ else:
     elif not report_type:
         st.info("👆 请选择报表类型")
 
-# ===== 导出历史 =====
+# ===== 历史 =====
 with st.expander("📋 导出历史记录"):
     if st.session_state.export_history:
         st.dataframe(pd.DataFrame(st.session_state.export_history))
     else:
         st.info("暂无导出记录")
 
-# ===== 查看知识库 =====
 with st.expander("📚 官方模板知识库"):
     st.dataframe(pd.DataFrame(TEMPLATES))
